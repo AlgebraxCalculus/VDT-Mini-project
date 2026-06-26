@@ -1,0 +1,122 @@
+@import 'leaflet/dist/leaflet.css';
+@import 'leaflet.markercluster/dist/MarkerCluster.css';
+@import 'leaflet.markercluster/dist/MarkerCluster.Default.css';
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  padding: 0;
+  height: 100%;
+  font-family: 'Be Vietnam Pro', system-ui, sans-serif;
+  color: #16181d;
+  -webkit-font-smoothing: antialiased;
+  background: #f4f5f7;
+}
+
+#root {
+  height: 100%;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: #cdd2d9;
+  border-radius: 8px;
+  border: 2px solid transparent;
+  background-clip: content-box;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #aeb5be;
+  background-clip: content-box;
+}
+
+.leaflet-container {
+  font-family: 'Be Vietnam Pro', sans-serif;
+  background: #e8ebef;
+}
+.leaflet-bar a {
+  border-radius: 0;
+}
+.leaflet-popup-content-wrapper {
+  border-radius: 12px;
+  box-shadow: 0 12px 32px rgba(16, 20, 30, 0.18);
+  padding: 2px;
+}
+.leaflet-popup-content {
+  margin: 14px 16px;
+  font-family: 'Be Vietnam Pro', sans-serif;
+}
+.leaflet-popup-tip {
+  box-shadow: 0 12px 32px rgba(16, 20, 30, 0.18);
+}
+
+.fws-dot {
+  border-radius: 50%;
+  border: 2.5px solid #fff;
+  box-shadow: 0 1px 5px rgba(10, 14, 25, 0.45);
+}
+.fws-pulse {
+  animation: fwsPulse 1.8s ease-out infinite;
+}
+@keyframes fwsPulse {
+  0% {
+    box-shadow: 0 0 0 0 rgba(238, 0, 51, 0.45);
+  }
+  70% {
+    box-shadow: 0 0 0 14px rgba(238, 0, 51, 0);
+  }
+  100% {
+    box-shadow: 0 0 0 0 rgba(238, 0, 51, 0);
+  }
+}
+.fws-cluster {
+  background: linear-gradient(135deg, #ee0033, #c8002b);
+  color: #fff;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 700;
+  font-family: 'Be Vietnam Pro', sans-serif;
+  border: 3px solid rgba(255, 255, 255, 0.85);
+  box-shadow: 0 3px 12px rgba(238, 0, 51, 0.4);
+}
+.marker-cluster div,
+.marker-cluster {
+  background: transparent !important;
+}
+@keyframes fwsSpin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+@keyframes fwsFade {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.fws-fade {
+  animation: fwsFade 0.28s ease;
+}
+
+input,
+button,
+select,
+textarea {
+  font-family: inherit;
+}
+
+button {
+  -webkit-tap-highlight-color: transparent;
+}

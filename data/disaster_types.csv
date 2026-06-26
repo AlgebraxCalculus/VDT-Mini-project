@@ -1,0 +1,16 @@
+id,code,name
+1,STORM,Bão / Áp thấp nhiệt đới
+2,FLOOD,"Lũ, ngập lụt"
+3,FLASH_FLOOD,Lũ quét
+4,LANDSLIDE,Sạt lở đất
+5,DROUGHT,Hạn hán
+6,SALTWATER_INTRUSION,Xâm nhập mặn
+7,HEATWAVE,Nắng nóng
+8,COLD_SPELL,"Rét đậm, rét hại"
+9,HAILSTORM,Mưa đá
+10,TORNADO,"Lốc, vòi rồng"
+11,THUNDERSTORM,"Dông, sét"
+12,RIVERBANK_EROSION,"Sạt lở bờ sông, bờ biển"
+13,TSUNAMI,Sóng thần
+14,EARTHQUAKE,Động đất
+15,FOREST_FIRE,Cháy rừng

@@ -1,0 +1,20 @@
+id,username,email,password_hash,full_name,is_active,last_login_at,created_at,updated_at,role_id
+1,nguyenvanan,nguyenvanan@hsms.vn,$2b$12$ArQtR9uJhz5bcCaEDxUU2OMVRMJ0ZQwpHFUY4EV.rqPe/VgSXJRFu,Nguyễn Văn An,true,2026-06-20 08:15:00+07,2026-06-10 00:00:00+07,2026-06-10 00:00:00+07,1
+2,tranthibinh,tranthibinh@hsms.vn,$2b$12$wkkrsIw.0VuLt2gSNTKN2un1XjGdiq3yyJvg9EJTczHh7zRYfOE2u,Trần Thị Bình,true,2026-06-19 17:42:00+07,2026-06-10 00:00:00+07,2026-06-10 00:00:00+07,1
+3,lehoangcuong,lehoangcuong@hsms.vn,$2b$12$6w.PryU00Ogiugfuj68D5eUVzuRgLtc4lq2CTrprVNLQJQGt98BzG,Lê Hoàng Cường,true,2026-06-20 09:03:00+07,2026-06-10 00:00:00+07,2026-06-10 00:00:00+07,2
+4,phamthidung,phamthidung@hsms.vn,$2b$12$ul3NQ83u7jQUJvUMuUCgJOea7YuX6Qcr7WonCx4tsqDXrtKgIz3Ae,Phạm Thị Dung,true,2026-06-18 14:20:00+07,2026-06-10 00:00:00+07,2026-06-10 00:00:00+07,2
+5,hoangminhduc,hoangminhduc@hsms.vn,$2b$12$LmU4/iPnQZvOLVrPIzIvwuZBlCp/OdGgbCmwf27Wh9A/TK.xh3Dpe,Hoàng Minh Đức,true,2026-06-20 07:55:00+07,2026-06-10 00:00:00+07,2026-06-10 00:00:00+07,2
+6,vuthiha,vuthiha@hsms.vn,$2b$12$.Ku03FdRTdr5ns8qv1uAnOFWcC5gtElX4dxDXvpetN.Hp4Ls/m4ju,Vũ Thị Hà,true,,2026-06-10 00:00:00+07,2026-06-10 00:00:00+07,2
+7,dangvanhai,dangvanhai@hsms.vn,$2b$12$ICGcwuW7xVNlSetIaPQ5/Oiae1H8A/vhNjGF3rNI0urwTR6z.4LGK,Đặng Văn Hải,true,2026-06-17 11:30:00+07,2026-06-10 00:00:00+07,2026-06-10 00:00:00+07,2
+8,buithihuong,buithihuong@hsms.vn,$2b$12$LPOcO43aJCCI1ZeNOVrW1O3/lIciPZ7WbBBd2dV4Xd1OWNR1spQIG,Bùi Thị Hương,true,2026-06-20 10:12:00+07,2026-06-10 00:00:00+07,2026-06-10 00:00:00+07,2
+9,domanhhung,domanhhung@hsms.vn,$2b$12$S8GudkVHmhhzWdSMv3GUMuQzcQIKEEZ87HFfSzL7NeANIub8fEcSi,Đỗ Mạnh Hùng,true,2026-06-16 16:48:00+07,2026-06-10 00:00:00+07,2026-06-10 00:00:00+07,2
+10,ngothilan,ngothilan@hsms.vn,$2b$12$sl2czdferSzVHmXeUafoYOoFuMR5WCW1eUtYDi5nykNrwX5hHIMty,Ngô Thị Lan,true,2026-06-19 13:05:00+07,2026-06-10 00:00:00+07,2026-06-10 00:00:00+07,3
+11,duongvanlong,duongvanlong@hsms.vn,$2b$12$BUtMv30PuIVzZhOoJ50cpOupPqL8xZTOByAzWtrxriNsSnWpiz3kC,Dương Văn Long,true,,2026-06-10 00:00:00+07,2026-06-10 00:00:00+07,3
+12,lythimai,lythimai@hsms.vn,$2b$12$oN9chg3G3s0FwUH2FtSVW.92X907C.gpWiQkOfFyGPnEOnvicT3Fm,Lý Thị Mai,true,2026-06-20 06:40:00+07,2026-06-10 00:00:00+07,2026-06-10 00:00:00+07,3
+13,phanvannam,phanvannam@hsms.vn,$2b$12$ZNGjG1VvqaBHyRJIX5RGw.F8kTJ7thnGGJ9.i/w/eZhMfAAYgLx2a,Phan Văn Nam,true,2026-06-15 19:22:00+07,2026-06-10 00:00:00+07,2026-06-10 00:00:00+07,3
+14,trinhthingoc,trinhthingoc@hsms.vn,$2b$12$XGbO9J5frXJZkEqc5./VGeG30EniiD43GhRd0Q2K/1evJudpjOYnS,Trịnh Thị Ngọc,true,2026-06-18 08:00:00+07,2026-06-10 00:00:00+07,2026-06-10 00:00:00+07,3
+15,maivanphuc,maivanphuc@hsms.vn,$2b$12$DT4it56AUPmfR3HbX0SXjOO/z2.DIacrC7PABGz7XhKJ3WQ/rS972,Mai Văn Phúc,true,,2026-06-10 00:00:00+07,2026-06-10 00:00:00+07,3
+16,dinhthiquynh,dinhthiquynh@hsms.vn,$2b$12$cWaRiff807UBCJYoT7/deO33HvhGxJbmIg4Qx69Q13.dauJ9ZXm96,Đinh Thị Quỳnh,true,2026-06-20 11:58:00+07,2026-06-10 00:00:00+07,2026-06-10 00:00:00+07,3
+17,tovanson,tovanson@hsms.vn,$2b$12$7SMA4j0iDy3OoUGT1alCvu885nTe9tuKBmdocViDGWO/8BYkAVa.e,Tô Văn Sơn,true,2026-06-14 15:10:00+07,2026-06-10 00:00:00+07,2026-06-10 00:00:00+07,3
+18,hothithu,hothithu@hsms.vn,$2b$12$4/6yjsa2hdNN.quYt3xRYOTVmvYHPqQTN0k.RA4wqTb5njwZi/2Gi,Hồ Thị Thu,true,2026-06-19 20:35:00+07,2026-06-10 00:00:00+07,2026-06-10 00:00:00+07,3
+19,chuvantuan,chuvantuan@hsms.vn,$2b$12$ved.jcmhyU5xMBDnmnFXpOI.6S8QJNpoPHV27VXoFICshOrVnllO2,Chu Văn Tuấn,true,2026-06-13 09:27:00+07,2026-06-10 00:00:00+07,2026-06-10 00:00:00+07,3

@@ -1,0 +1,73 @@
+services:
+  # PostgreSQL + PostGIS database
+  db:
+    image: postgis/postgis:16-3.4
+    container_name: vdt-flood-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-flood}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-flood_secret}
+      POSTGRES_DB: ${POSTGRES_DB:-flood_warning}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - db_data:/var/lib/postgresql/data
+      - ./docker/init-postgis.sql:/docker-entrypoint-initdb.d/00-init-postgis.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-flood} -d ${POSTGRES_DB:-flood_warning}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Redis — cache, internal Pub/Sub event bus, Socket.IO redis-adapter, token store
+  redis:
+    image: redis:7-alpine
+    container_name: vdt-flood-redis
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # NestJS API — runs TypeORM migrations on startup, then serves the app
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vdt-flood-api:latest
+    container_name: vdt-flood-api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    # Provides JWT_* / BCRYPT_* / CORS_ORIGINS to the container (.env is in
+    # .dockerignore, so it isn't baked into the image). The explicit environment
+    # block below still wins over these — Compose precedence: environment > env_file.
+    env_file:
+      - .env
+    environment:
+      DB_HOST: db
+      DB_PORT: 5432
+      DB_USER: ${POSTGRES_USER:-flood}
+      DB_PASSWORD: ${POSTGRES_PASSWORD:-flood_secret}
+      DB_NAME: ${POSTGRES_DB:-flood_warning}
+      DB_LOGGING: ${DB_LOGGING:-false}
+      API_PORT: 3000
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-}
+      REDIS_DB: ${REDIS_DB:-0}
+    ports:
+      - "${API_PORT:-3000}:3000"
+
+volumes:
+  db_data:
+  redis_data:
