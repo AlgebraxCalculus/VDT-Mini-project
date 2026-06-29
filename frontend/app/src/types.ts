@@ -17,6 +17,12 @@ export type MapLayout = 'A' | 'B' | 'C';
 /** Cached real-time risk state — mirrors backend RiskStatus enum. */
 export type RiskStatus = 'NORMAL' | 'WATCH' | 'WARNING' | 'DANGER';
 
+/**
+ * Severity bucket of a single risk assessment — mirrors backend RiskSeverity.
+ * Banded from risk_score (0–100): <30 LOW, <60 MEDIUM, ≥60 HIGH.
+ */
+export type RiskSeverity = 'LOW' | 'MEDIUM' | 'HIGH';
+
 /** Lightweight province reference (no boundary geometry — BE drops it). */
 export interface ProvinceRef {
   id: number;
@@ -53,11 +59,68 @@ export interface Station {
   elevation: number | null;
   provinceId: number | null;
   province: ProvinceRef | null; // {id, code, name} — no boundary
-  riskStatus: RiskStatus | null; // enum, not a 0–10 number
+  riskStatus: RiskStatus | null; // enum, not a numeric score
   thresholds: Threshold[]; // 0–3 tiers, must be read null-safe
   // ── Enrichment: separate APIs at merge, mock-only for now ──────────────
   weather?: StationWeather; // weather snapshot API
-  riskScore?: number; // 0–10 display metric (risk-assessment job)
+  riskScore?: number; // 0–100 metric — station_risk_assessments.risk_score (Group G)
+  severity?: RiskSeverity; // peak severity in the forecast window (Group G)
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Group G — Risk & forecast read side (APIs 36–39). These mirror the backend
+// response shapes exactly so the mock can be swapped for the real API at merge.
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * One row of GET /risk/stations (API 36): a pre-computed assessment for a
+ * station on a single forecast day, joined to its station/province. risk_score
+ * is 0–100; eventId is a BIGINT string (or null).
+ */
+export interface RiskAssessment {
+  id: string;
+  stationId: number;
+  eventId: string | null;
+  forecastDate: string; // YYYY-MM-DD
+  predictedWaterLevel: number | null;
+  thresholdValue: number | null;
+  isExceeded: boolean;
+  severity: RiskSeverity | null;
+  riskScore: number | null; // 0–100
+  computedAt: string; // ISO timestamp
+  station: Station;
+}
+
+/** One aggregated day in a forecast series (GET /forecasts/provinces/:id, API 37). */
+export interface ForecastPoint {
+  date: string; // YYYY-MM-DD
+  temperature: number | null;
+  rainfall: number | null;
+  windSpeed: number | null;
+  windDirection: number | null;
+  riverWaterLevel: number | null;
+}
+
+/** A station forecast day enriched with its on-the-fly risk classification (API 38). */
+export interface ClassifiedForecastPoint extends ForecastPoint {
+  severity: RiskSeverity;
+  alertLevel: number; // 0–3
+  isExceeded: boolean;
+  riskScore: number; // 0–100
+}
+
+/** One immutable triggered-alert record (GET /stations/:id/alert-history, API 39). */
+export interface AlertHistoryEntry {
+  id: string;
+  stationId: number;
+  eventId: string | null;
+  alertLevel: number; // 1–3
+  triggeredAt: string; // ISO timestamp
+  actualValue: number | null;
+  thresholdValue: number | null;
+  reason: string | null;
+  weatherSnapshotId: string | null;
+  createdAt: string;
 }
 
 export interface ForecastDay {

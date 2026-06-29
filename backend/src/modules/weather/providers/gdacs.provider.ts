@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { WeatherSource } from '../entities/weather-snapshot.entity';
-import { HealthCheckable } from './weather-provider.interface';
+import { DisasterProvider } from './weather-provider.interface';
 import { fetchJson, HttpOptions, pingUrl } from './http.util';
 
 /**
@@ -11,7 +11,7 @@ import { fetchJson, HttpOptions, pingUrl } from './http.util';
  * Wiring GDACS events into `disaster_events` belongs to Group D, on hold.
  */
 @Injectable()
-export class GdacsProvider implements HealthCheckable {
+export class GdacsProvider implements DisasterProvider {
   readonly code = WeatherSource.GDACS;
   readonly requiresKey = false;
 

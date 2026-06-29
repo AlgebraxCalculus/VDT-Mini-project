@@ -66,7 +66,11 @@ export class HealthMonitorService {
     try {
       latencyMs = await provider.ping(this.pingTimeoutMs);
     } catch (err) {
-      error = (err as Error).message;
+      // Node's global fetch wraps every network-level failure in a generic
+      // "fetch failed" — the actionable reason (ETIMEDOUT, ENETUNREACH, DNS,
+      // IPv6 unroutable, TLS…) lives in err.cause. Surface it so API 35 shows
+      // *why* a source is DOWN instead of an opaque "fetch failed".
+      error = describeError(err);
     }
 
     const ok = error === null;
@@ -100,6 +104,8 @@ export class HealthMonitorService {
     await this.redis.client.set(key, JSON.stringify(value));
   }
 
+  // describeError lives at module scope (below the class).
+
   /** Read the latest cached health of every source (API 35). */
   async getAll(): Promise<SourceHealth[]> {
     const results: SourceHealth[] = [];
@@ -121,4 +127,23 @@ export class HealthMonitorService {
     }
     return results;
   }
+}
+
+/**
+ * Build a human-readable error string, unwrapping the `cause` chain that Node's
+ * global fetch hides behind a generic "fetch failed". Surfaces codes like
+ * ETIMEDOUT / ENETUNREACH / ENOTFOUND so a DOWN source is actually diagnosable.
+ */
+function describeError(err: unknown): string {
+  const e = err as { message?: string; code?: string; cause?: unknown } | null;
+  const parts: string[] = [];
+  if (e?.message) parts.push(e.message);
+  let cause: unknown = e?.cause;
+  for (let depth = 0; cause && depth < 3; depth++) {
+    const c = cause as { message?: string; code?: string; cause?: unknown };
+    const detail = c.code ?? c.message;
+    if (detail && !parts.includes(detail)) parts.push(detail);
+    cause = c.cause;
+  }
+  return parts.join(': ') || String(err);
 }

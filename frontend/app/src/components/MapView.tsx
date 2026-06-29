@@ -2,9 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import L from 'leaflet';
 import { useApp } from '../state/AppStateContext';
-import { forecast7d, riskMeta, FLOOD_LEGEND, WEATHER_LEGENDS } from '../data/mockData';
-import { apiListStationsInViewport, ApiError } from '../lib/api';
-import type { MapLayout, Station, WeatherLayerKey } from '../types';
+import { band, riskMeta, FLOOD_LEGEND, WEATHER_LEGENDS, forecastDayLabel } from '../data/mockData';
+import { apiListStationsInViewport, apiGetStationForecast, apiGetStationAlertHistory, apiGetProvinceForecast, ApiError } from '../lib/api';
+import type { AlertHistoryEntry, ClassifiedForecastPoint, ForecastPoint, MapLayout, Station, WeatherLayerKey } from '../types';
 
 const WEATHER_FIELDS: Record<WeatherLayerKey, [number, number, string, number][]> = {
   temp: [
@@ -46,6 +46,29 @@ const SCRUB_LABELS = ['Hôm nay', 'T7 20/6', 'CN 21/6', 'T2 22/6', 'T3 23/6', 'T
 const SCRUB_SHORT = ['19/6', '20/6', '21/6', '22/6', '23/6', '24/6', '25/6'];
 const SCRUB_HEIGHTS = [26, 30, 38, 34, 28, 22, 18];
 
+// alert_histories.alert_level → colour (1 Chú ý, 2 Cảnh báo, 3 Nguy hiểm).
+const ALERT_LEVEL_COLOR: Record<number, string> = { 1: '#EAB308', 2: '#F97316', 3: '#EE0033' };
+
+/** Format an ISO timestamp as dd/MM/yyyy HH:mm for the alert-history timeline. */
+function fmtDateTime(iso: string): string {
+  const d = new Date(iso);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`;
+}
+
+/** Day/month label (d/M) for a YYYY-MM-DD / ISO date — used by the forecast scrubber. */
+const dayMonth = (iso: string) => {
+  const d = new Date(iso);
+  return `${d.getDate()}/${d.getMonth() + 1}`;
+};
+
+/** Scrubber bar height (px) from a day's rainfall (mm) — the flood-relevant signal. */
+const rainBarHeight = (rain: number | null) => Math.max(6, Math.min(40, 8 + (rain ?? 0) * 0.9));
+
+// 8-point Vietnamese compass (B=North, Đ=East, N=South, T=West), 45° per sector.
+const COMPASS = ['B', 'ĐB', 'Đ', 'ĐN', 'N', 'TN', 'T', 'TB'];
+const windDir = (deg: number | null) => (deg == null ? '' : COMPASS[Math.round(deg / 45) % 8]);
+
 const railBtnBase: CSSProperties = {
   width: 44,
   height: 44,
@@ -82,6 +105,15 @@ export default function MapView() {
   const [stations, setStations] = useState<Station[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+
+  // Selected-station detail (APIs 38 & 39) — loaded on select, mock-backed for
+  // now. setState lives in the .then() callbacks of the effect below (not a
+  // synchronous effect body) to respect the project's set-state-in-effect baseline.
+  const [selForecast, setSelForecast] = useState<ClassifiedForecastPoint[]>([]);
+  const [selHistory, setSelHistory] = useState<AlertHistoryEntry[]>([]);
+  // Province aggregate forecast (API 37) for the selected station's province —
+  // drives the bottom "Mốc dự báo" timeline; empty → the static prototype bars.
+  const [provForecast, setProvForecast] = useState<ForecastPoint[]>([]);
 
   useEffect(() => {
     if (!mapNodeRef.current) return;
@@ -200,10 +232,10 @@ export default function MapView() {
     if (!map || !floodGroup) return;
     floodGroup.clearLayers();
     if (floodOn) {
-      stations.filter((s) => s.latitude != null && s.longitude != null && (s.riskScore ?? 0) >= 3).forEach((s) => {
+      stations.filter((s) => s.latitude != null && s.longitude != null && (s.riskScore ?? 0) >= 30).forEach((s) => {
         const score = s.riskScore ?? 0;
         const color = riskMeta(s.riskStatus).color;
-        L.circle([s.latitude!, s.longitude!], { radius: 6000 + score * 4500, color, weight: 1, fillColor: color, fillOpacity: 0.16, interactive: false }).addTo(floodGroup);
+        L.circle([s.latitude!, s.longitude!], { radius: 6000 + score * 450, color, weight: 1, fillColor: color, fillOpacity: 0.16, interactive: false }).addTo(floodGroup);
       });
       if (!map.hasLayer(floodGroup)) floodGroup.addTo(map);
     } else if (map.hasLayer(floodGroup)) {
@@ -221,6 +253,56 @@ export default function MapView() {
       L.circle([f[0], f[1]], { radius: 90000, color: f[2], weight: 0, fillColor: f[2], fillOpacity: f[3], interactive: false }).addTo(weatherGroup);
     });
   }, [weatherLayer]);
+
+  // Load the selected station's 7-day forecast (API 38) + alert history (API 39).
+  // Keyed by station id only — the forecast/history don't change on pan, so this
+  // doesn't refire when the viewport refetches. setState runs inside the resolved-
+  // promise callbacks (never synchronously in the effect body); errors clear the
+  // panel rather than break it (401 is handled by the transparent refresh in request).
+  useEffect(() => {
+    let alive = true;
+    if (selectedId == null) {
+      Promise.resolve().then(() => { if (alive) { setSelForecast([]); setSelHistory([]); } });
+      return () => { alive = false; };
+    }
+    apiGetStationForecast(selectedId)
+      .then((f) => { if (alive) setSelForecast(f.series); })
+      .catch(() => { if (alive) setSelForecast([]); });
+    apiGetStationAlertHistory(selectedId)
+      .then((h) => { if (alive) setSelHistory(h.data); })
+      .catch(() => { if (alive) setSelHistory([]); });
+    return () => { alive = false; };
+  }, [selectedId]);
+
+  // Province aggregate forecast (API 37) for the scrubber. Keyed by province id,
+  // so it doesn't refire on pan and skips the refetch when the next selected
+  // station shares the same province. Clears (→ mock bars) when nothing is selected.
+  const selProvinceId = stations.find((s) => s.id === selectedId)?.provinceId ?? null;
+  useEffect(() => {
+    let alive = true;
+    if (selProvinceId == null) {
+      Promise.resolve().then(() => {
+        if (!alive) return;
+        setProvForecast([]);
+        patch({ scrubDayCount: 7 }); // back to the 7-day mock scrubber
+      });
+      return () => { alive = false; };
+    }
+    apiGetProvinceForecast(selProvinceId)
+      .then((p) => {
+        if (!alive) return;
+        setProvForecast(p.series);
+        // Sync the play timer's cycle length to the live day count and restart
+        // the timeline at "today" so it never lands on a non-existent day.
+        patch({ scrubDayCount: p.series.length || 7, scrubDay: 0 });
+      })
+      .catch(() => {
+        if (!alive) return;
+        setProvForecast([]);
+        patch({ scrubDayCount: 7 });
+      });
+    return () => { alive = false; };
+  }, [selProvinceId, patch]);
 
   const flyTo = (s: Station) => {
     const map = mapRef.current;
@@ -248,14 +330,27 @@ export default function MapView() {
 
   const sel = stations.find((s) => s.id === selectedId);
   const selMeta = sel ? riskMeta(sel.riskStatus) : null;
-  const selForecast = sel ? forecast7d(sel.riskScore ?? 0) : [];
-  const selHistory = sel && selMeta
-    ? [
-        { title: `Cảnh báo ${selMeta.label}${sel.riskScore != null ? ` — chỉ số ${sel.riskScore}` : ''}`, time: '19/06/2026 06:00', color: selMeta.color },
-        { title: 'Mưa lớn diện rộng ghi nhận', time: '18/06/2026 21:30', color: '#F97316' },
-        { title: 'Đồng bộ dữ liệu Open-Meteo', time: '18/06/2026 18:00', color: '#94A3B8' },
-      ]
-    : [];
+  // Today's forecast point backs the stat tiles: there is no "current weather"
+  // endpoint in the 47-API spec, so the nearest forecast day is the closest
+  // backend-true source for temp / rain / wind / river level.
+  const today = selForecast[0] ?? null;
+
+  // Scrubber timeline: the real province aggregate (API 37) when a station is
+  // selected, else the static prototype bars. Bar height ∝ that day's rainfall.
+  const scrubLive = provForecast.length > 0;
+  const scrubDays = scrubLive
+    ? provForecast.map((p) => ({ short: dayMonth(p.date), full: `${forecastDayLabel(p.date)} ${dayMonth(p.date)}`, height: rainBarHeight(p.rainfall) }))
+    : SCRUB_HEIGHTS.map((h, i) => ({ short: SCRUB_SHORT[i], full: SCRUB_LABELS[i], height: h }));
+  const dayCount = scrubDays.length;
+  const activeDay = Math.min(scrubDay, dayCount - 1);
+  // Full forecast readout for the day under the scrubber cursor (live only).
+  const activePoint = scrubLive ? provForecast[activeDay] ?? null : null;
+  const fieldChips = [
+    { label: 'Nhiệt độ', color: '#F97316', value: activePoint?.temperature != null ? `${activePoint.temperature}°C` : '—' },
+    { label: 'Mưa', color: '#2563EB', value: activePoint?.rainfall != null ? `${activePoint.rainfall} mm` : '—' },
+    { label: 'Gió', color: '#7C3AED', value: activePoint?.windSpeed != null ? `${activePoint.windSpeed} m/s${activePoint.windDirection != null ? ` ${windDir(activePoint.windDirection)}` : ''}` : '—' },
+    { label: 'Mực nước sông', color: '#0EA5E9', value: activePoint?.riverWaterLevel != null ? `${activePoint.riverWaterLevel} m` : '—' },
+  ];
 
   const legend = weatherLayer ? WEATHER_LEGENDS[weatherLayer] : null;
 
@@ -408,48 +503,55 @@ export default function MapView() {
             </div>
           </div>
           <div style={{ overflowY: 'auto', padding: 16 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#6B7280', letterSpacing: 0.4, textTransform: 'uppercase', marginBottom: 9 }}>Dự báo hôm nay</div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 9 }}>
               <div style={{ background: '#FAFAFB', border: '1px solid #EEF0F3', borderRadius: 11, padding: '11px 12px' }}>
                 <div style={{ fontSize: 11, color: '#9AA0A6', fontWeight: 600 }}>Nhiệt độ</div>
-                <div style={{ fontSize: 20, fontWeight: 800, fontFamily: "'IBM Plex Mono',monospace", marginTop: 2 }}>{sel.weather?.temp ?? '—'}°</div>
+                <div style={{ fontSize: 20, fontWeight: 800, fontFamily: "'IBM Plex Mono',monospace", marginTop: 2 }}>{today?.temperature ?? '—'}°</div>
               </div>
               <div style={{ background: '#FAFAFB', border: '1px solid #EEF0F3', borderRadius: 11, padding: '11px 12px' }}>
-                <div style={{ fontSize: 11, color: '#9AA0A6', fontWeight: 600 }}>Lượng mưa 1h</div>
-                <div style={{ fontSize: 20, fontWeight: 800, fontFamily: "'IBM Plex Mono',monospace", marginTop: 2 }}>{sel.weather?.rain ?? '—'}<span style={{ fontSize: 12, fontWeight: 500, color: '#9AA0A6' }}> mm</span></div>
+                <div style={{ fontSize: 11, color: '#9AA0A6', fontWeight: 600 }}>Mưa dự báo (ngày)</div>
+                <div style={{ fontSize: 20, fontWeight: 800, fontFamily: "'IBM Plex Mono',monospace", marginTop: 2 }}>{today?.rainfall ?? '—'}<span style={{ fontSize: 12, fontWeight: 500, color: '#9AA0A6' }}> mm</span></div>
               </div>
               <div style={{ background: '#FAFAFB', border: '1px solid #EEF0F3', borderRadius: 11, padding: '11px 12px' }}>
                 <div style={{ fontSize: 11, color: '#9AA0A6', fontWeight: 600 }}>Gió</div>
-                <div style={{ fontSize: 20, fontWeight: 800, fontFamily: "'IBM Plex Mono',monospace", marginTop: 2 }}>{sel.weather?.wind ?? '—'}<span style={{ fontSize: 12, fontWeight: 500, color: '#9AA0A6' }}> m/s</span></div>
+                <div style={{ fontSize: 20, fontWeight: 800, fontFamily: "'IBM Plex Mono',monospace", marginTop: 2 }}>{today?.windSpeed ?? '—'}<span style={{ fontSize: 12, fontWeight: 500, color: '#9AA0A6' }}> m/s</span></div>
               </div>
               <div style={{ background: '#FAFAFB', border: '1px solid #EEF0F3', borderRadius: 11, padding: '11px 12px' }}>
-                <div style={{ fontSize: 11, color: '#9AA0A6', fontWeight: 600 }}>Độ ẩm</div>
-                <div style={{ fontSize: 20, fontWeight: 800, fontFamily: "'IBM Plex Mono',monospace", marginTop: 2 }}>{sel.weather?.humid ?? '—'}<span style={{ fontSize: 12, fontWeight: 500, color: '#9AA0A6' }}> %</span></div>
+                <div style={{ fontSize: 11, color: '#9AA0A6', fontWeight: 600 }}>Mực nước sông</div>
+                <div style={{ fontSize: 20, fontWeight: 800, fontFamily: "'IBM Plex Mono',monospace", marginTop: 2 }}>{today?.riverWaterLevel ?? '—'}<span style={{ fontSize: 12, fontWeight: 500, color: '#9AA0A6' }}> m</span></div>
               </div>
             </div>
 
             <div style={{ fontSize: 12, fontWeight: 700, color: '#6B7280', letterSpacing: 0.4, textTransform: 'uppercase', margin: '18px 0 9px' }}>Dự báo chỉ số ngập 7 ngày</div>
             <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 78 }}>
-              {selForecast.map((f, i) => (
-                <div key={i} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5 }}>
-                  <div style={{ width: '100%', borderRadius: '5px 5px 2px 2px', background: f.color, height: f.h, minHeight: 5 }} />
-                  <div style={{ fontSize: 9.5, color: '#9AA0A6', fontFamily: "'IBM Plex Mono',monospace" }}>{f.day}</div>
+              {selForecast.map((f) => (
+                <div key={f.date} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5 }}>
+                  <div title={`Chỉ số ${f.riskScore}`} style={{ width: '100%', borderRadius: '5px 5px 2px 2px', background: band(f.riskScore)[1], height: 8 + f.riskScore * 0.7, minHeight: 5 }} />
+                  <div style={{ fontSize: 9.5, color: '#9AA0A6', fontFamily: "'IBM Plex Mono',monospace" }}>{forecastDayLabel(f.date)}</div>
                 </div>
               ))}
             </div>
 
             <div style={{ fontSize: 12, fontWeight: 700, color: '#6B7280', letterSpacing: 0.4, textTransform: 'uppercase', margin: '18px 0 9px' }}>Lịch sử cảnh báo</div>
-            {selHistory.map((h, i) => (
-              <div key={i} style={{ display: 'flex', gap: 10, paddingBottom: 12 }}>
-                <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
-                  <span style={{ width: 9, height: 9, borderRadius: '50%', background: h.color, marginTop: 3 }} />
-                  <span style={{ flex: 1, width: 2, background: '#EEF0F3' }} />
+            {selHistory.length === 0 && (
+              <div style={{ fontSize: 12, color: '#9AA0A6', paddingBottom: 10 }}>Chưa có cảnh báo nào cho trạm này.</div>
+            )}
+            {selHistory.map((h) => {
+              const color = ALERT_LEVEL_COLOR[h.alertLevel] ?? '#94A3B8';
+              return (
+                <div key={h.id} style={{ display: 'flex', gap: 10, paddingBottom: 12 }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+                    <span style={{ width: 9, height: 9, borderRadius: '50%', background: color, marginTop: 3 }} />
+                    <span style={{ flex: 1, width: 2, background: '#EEF0F3' }} />
+                  </div>
+                  <div style={{ flex: 1 }}>
+                    <div style={{ fontSize: 12.5, fontWeight: 600 }}>{h.reason ?? `Cảnh báo cấp ${h.alertLevel}`}</div>
+                    <div style={{ fontSize: 11, color: '#9AA0A6', fontFamily: "'IBM Plex Mono',monospace", marginTop: 1 }}>{fmtDateTime(h.triggeredAt)}</div>
+                  </div>
                 </div>
-                <div style={{ flex: 1 }}>
-                  <div style={{ fontSize: 12.5, fontWeight: 600 }}>{h.title}</div>
-                  <div style={{ fontSize: 11, color: '#9AA0A6', fontFamily: "'IBM Plex Mono',monospace", marginTop: 1 }}>{h.time}</div>
-                </div>
-              </div>
-            ))}
+              );
+            })}
 
             <button onClick={() => patch({ route: 'forecast' })} style={{ width: '100%', height: 42, border: 'none', borderRadius: 10, background: '#EE0033', color: '#fff', fontSize: 13.5, fontWeight: 700, cursor: 'pointer', marginTop: 4 }}>
               Xem chi tiết &amp; xuất báo cáo
@@ -483,7 +585,7 @@ export default function MapView() {
 
       <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, zIndex: 500, background: 'rgba(255,255,255,.96)', backdropFilter: 'blur(8px)', borderTop: '1px solid #E8EAEE', padding: '11px 18px', display: 'flex', alignItems: 'center', gap: 16 }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-          <button onClick={() => patch((s) => ({ scrubDay: (s.scrubDay + 6) % 7 }))} style={{ width: 34, height: 34, border: '1px solid #E2E5EA', background: '#fff', borderRadius: 8, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#3A3F47' }}>
+          <button onClick={() => patch((s) => ({ scrubDay: (s.scrubDay + dayCount - 1) % dayCount }))} style={{ width: 34, height: 34, border: '1px solid #E2E5EA', background: '#fff', borderRadius: 8, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#3A3F47' }}>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M16 5v14M9 12l7-7v14l-7-7Z" fill="currentColor" /></svg>
           </button>
           <button onClick={togglePlay} style={{ width: 40, height: 40, border: 'none', background: '#EE0033', borderRadius: 9, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#fff', boxShadow: '0 4px 12px rgba(238,0,51,.3)' }}>
@@ -493,30 +595,53 @@ export default function MapView() {
               <svg width="16" height="16" viewBox="0 0 24 24" fill="#fff"><path d="M8 5v14l11-7L8 5Z" /></svg>
             )}
           </button>
-          <button onClick={() => patch((s) => ({ scrubDay: (s.scrubDay + 1) % 7 }))} style={{ width: 34, height: 34, border: '1px solid #E2E5EA', background: '#fff', borderRadius: 8, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#3A3F47' }}>
+          <button onClick={() => patch((s) => ({ scrubDay: (s.scrubDay + 1) % dayCount }))} style={{ width: 34, height: 34, border: '1px solid #E2E5EA', background: '#fff', borderRadius: 8, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#3A3F47' }}>
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M8 5v14M15 12L8 5v14l7-7Z" fill="currentColor" /></svg>
           </button>
         </div>
-        <div style={{ flex: 'none', width: 150 }}>
-          <div style={{ fontSize: 11, color: '#9AA0A6', fontWeight: 600 }}>Mốc dự báo</div>
-          <div style={{ fontSize: 14.5, fontWeight: 700, fontFamily: "'IBM Plex Mono',monospace" }}>{SCRUB_LABELS[scrubDay]}</div>
+        <div style={{ flex: 'none', minWidth: 168 }}>
+          <div style={{ fontSize: 11, color: '#9AA0A6', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}>
+            Mốc dự báo
+            {scrubLive && (
+              <span title="Dự báo tổng hợp theo tỉnh/thành — trực tiếp (API 37)" style={{ fontSize: 9.5, fontWeight: 700, color: '#16794A', background: '#F3FBF6', border: '1px solid #CDEBD8', padding: '1px 6px', borderRadius: 6, whiteSpace: 'nowrap', display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                <span style={{ width: 6, height: 6, borderRadius: '50%', background: '#16A34A', flex: 'none' }} />
+                {sel?.province?.name ?? '—'}
+              </span>
+            )}
+          </div>
+          <div style={{ fontSize: 14.5, fontWeight: 700, fontFamily: "'IBM Plex Mono',monospace" }}>{scrubDays[activeDay]?.full ?? '—'}</div>
         </div>
         <div style={{ flex: 1, display: 'flex', gap: 4, alignItems: 'flex-end', height: 40 }}>
-          {SCRUB_HEIGHTS.map((h, i) => {
-            const on = i === scrubDay;
+          {scrubDays.map((d, i) => {
+            const on = i === activeDay;
+            const p = scrubLive ? provForecast[i] : null;
+            const tip = p
+              ? `${d.full} · Nhiệt độ ${p.temperature ?? '—'}°C · Mưa ${p.rainfall ?? '—'}mm · Gió ${p.windSpeed ?? '—'}m/s${p.windDirection != null ? ` ${windDir(p.windDirection)}` : ''} · Mực nước ${p.riverWaterLevel ?? '—'}m`
+              : d.full;
             return (
-              <button key={i} onClick={() => patch({ scrubDay: i })} style={{ flex: 1, height: '100%', border: 'none', background: 'transparent', cursor: 'pointer', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', gap: 3, padding: 0 }}>
-                <span style={{ width: '100%', borderRadius: 4, background: on ? '#EE0033' : '#F4B8C4', height: h, minHeight: 5, opacity: on ? 1 : 0.8 }} />
-                <span style={{ fontSize: 9.5, fontWeight: on ? 700 : 500, color: on ? '#EE0033' : '#9AA0A6', fontFamily: "'IBM Plex Mono',monospace", textAlign: 'center' }}>{SCRUB_SHORT[i]}</span>
+              <button key={i} title={tip} onClick={() => patch({ scrubDay: i })} style={{ flex: 1, height: '100%', border: 'none', background: 'transparent', cursor: 'pointer', display: 'flex', flexDirection: 'column', justifyContent: 'flex-end', gap: 3, padding: 0 }}>
+                <span style={{ width: '100%', borderRadius: 4, background: on ? '#EE0033' : '#F4B8C4', height: d.height, minHeight: 5, opacity: on ? 1 : 0.8 }} />
+                <span style={{ fontSize: 9.5, fontWeight: on ? 700 : 500, color: on ? '#EE0033' : '#9AA0A6', fontFamily: "'IBM Plex Mono',monospace", textAlign: 'center' }}>{d.short}</span>
               </button>
             );
           })}
         </div>
-        <div style={{ flex: 'none', display: 'flex', alignItems: 'center', gap: 14, paddingLeft: 8, borderLeft: '1px solid #E8EAEE' }}>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: '#6B7280' }}><span style={{ width: 9, height: 9, borderRadius: '50%', background: '#F97316' }} />Nhiệt độ</span>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: '#6B7280' }}><span style={{ width: 9, height: 9, borderRadius: '50%', background: '#2563EB' }} />Mưa</span>
-          <span style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 11.5, color: '#6B7280' }}><span style={{ width: 9, height: 9, borderRadius: '50%', background: '#7C3AED' }} />Gió</span>
-        </div>
+        {scrubLive ? (
+          <div style={{ flex: 'none', display: 'flex', alignItems: 'center', gap: 16, paddingLeft: 12, borderLeft: '1px solid #E8EAEE' }}>
+            {fieldChips.map((f) => (
+              <div key={f.label} style={{ display: 'flex', flexDirection: 'column', lineHeight: 1.2 }}>
+                <span style={{ fontSize: 9.5, color: '#9AA0A6', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' }}>
+                  <span style={{ width: 8, height: 8, borderRadius: '50%', background: f.color, flex: 'none' }} />{f.label}
+                </span>
+                <span style={{ fontSize: 12.5, fontWeight: 700, fontFamily: "'IBM Plex Mono',monospace", color: '#16181D', whiteSpace: 'nowrap' }}>{f.value}</span>
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div style={{ flex: 'none', maxWidth: 210, paddingLeft: 12, borderLeft: '1px solid #E8EAEE', fontSize: 11.5, color: '#9AA0A6', lineHeight: 1.35 }}>
+            Chọn một trạm để xem dự báo chi tiết theo tỉnh (nhiệt độ · mưa · gió · mực nước sông).
+          </div>
+        )}
       </div>
 
       <div style={{ position: 'absolute', bottom: 84, left: '50%', transform: 'translateX(-50%)', zIndex: 500, display: 'flex', alignItems: 'center', gap: 4, background: '#fff', borderRadius: 10, boxShadow: '0 4px 14px rgba(16,20,30,.14)', padding: 4 }}>

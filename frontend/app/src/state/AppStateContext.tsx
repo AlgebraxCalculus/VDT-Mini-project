@@ -21,6 +21,7 @@ export interface AppState {
   selectedId: number | null;
   searchText: string;
   scrubDay: number;
+  scrubDayCount: number; // length of the forecast scrubber (5–7 live, 7 for mock)
   playing: boolean;
   syncing: boolean;
   mapLayout: MapLayout;
@@ -48,6 +49,7 @@ const initialState: AppState = {
   selectedId: null,
   searchText: '',
   scrubDay: 0,
+  scrubDayCount: 7,
   playing: false,
   syncing: false,
   mapLayout: 'A',
@@ -113,7 +115,7 @@ export function AppStateProvider({ children }: { children: ReactNode }) {
       }
       clearInterval(playTimer.current);
       playTimer.current = setInterval(() => {
-        patch((s) => ({ scrubDay: (s.scrubDay + 1) % 7 }));
+        patch((s) => ({ scrubDay: (s.scrubDay + 1) % (s.scrubDayCount || 7) }));
       }, 1100);
       return { ...prev, playing: true };
     });

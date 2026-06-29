@@ -11,9 +11,11 @@ import {
   WeatherSnapshot,
   WeatherSource,
 } from './entities/weather-snapshot.entity';
-import { FORECAST_PROVIDERS } from './weather.constants';
-import { ForecastProvider } from './providers/weather-provider.interface';
-import { GdacsProvider } from './providers/gdacs.provider';
+import { DISASTER_PROVIDERS, FORECAST_PROVIDERS } from './weather.constants';
+import {
+  DisasterProvider,
+  ForecastProvider,
+} from './providers/weather-provider.interface';
 import { ForecastResult, ForecastTarget } from './types/normalized-forecast';
 
 /** Input for one ingestion run (manual refresh or scheduled cron). */
@@ -46,8 +48,8 @@ interface ForecastInsert {
 
 /**
  * Core weather ingestion, shared by the BullMQ processor (manual refresh + cron).
- * Resolves targets → fetches via the fallback chain Open-Meteo → OWM → WeatherAPI
- * → normalizes → persists snapshot + forecasts in one transaction → publishes
+ * Resolves targets → fetches via the fallback chain Open-Meteo → MET Norway →
+ * WeatherAPI → normalizes → persists snapshot + forecasts in one transaction → publishes
  * WEATHER_SNAPSHOT so the (future) Risk Engine recomputes. This is the producer
  * that was missing for the pre-declared WEATHER_SNAPSHOT channel.
  */
@@ -64,7 +66,8 @@ export class WeatherIngestionService {
     private readonly stationsRepo: Repository<Station>,
     @Inject(FORECAST_PROVIDERS)
     private readonly forecastProviders: ForecastProvider[],
-    private readonly gdacs: GdacsProvider,
+    @Inject(DISASTER_PROVIDERS)
+    private readonly disasterProviders: DisasterProvider[],
     private readonly eventBus: EventBusService,
     private readonly config: ConfigService,
   ) {
@@ -83,7 +86,7 @@ export class WeatherIngestionService {
   }
 
   // ---------------------------------------------------------------------------
-  // Forecast path (Open-Meteo → OWM → WeatherAPI)
+  // Forecast path (Open-Meteo → MET Norway → WeatherAPI)
   // ---------------------------------------------------------------------------
 
   private async ingestForecast(
@@ -178,7 +181,8 @@ export class WeatherIngestionService {
   }
 
   // ---------------------------------------------------------------------------
-  // Disaster path (GDACS) — stores raw events on a GDACS snapshot
+  // Disaster path — fallback chain GDACS → ReliefWeb → EONET. Stores the raw
+  // events on a snapshot tagged with whichever source succeeded.
   // ---------------------------------------------------------------------------
 
   private async ingestDisaster(
@@ -186,27 +190,52 @@ export class WeatherIngestionService {
   ): Promise<{ snapshotId: string }> {
     const snapshot = await this.snapshotsRepo.save(
       this.snapshotsRepo.create({
-        sourceCode: WeatherSource.GDACS,
+        sourceCode: WeatherSource.GDACS, // updated to the source that succeeds
         triggerType: opts.trigger,
         triggeredBy: opts.triggeredBy,
         status: 'PENDING',
       }),
     );
     try {
-      const raw = await this.gdacs.fetchEvents();
+      const { raw, source } = await this.fetchDisastersWithFallback();
       await this.snapshotsRepo.update(snapshot.id, {
+        sourceCode: source,
         status: 'SUCCESS',
         rawPayload: this.trimRaw(raw),
       });
       await this.eventBus.publish(EVENT_CHANNELS.WEATHER_SNAPSHOT, {
         snapshotId: snapshot.id,
-        sourceCode: WeatherSource.GDACS,
+        sourceCode: source,
       });
+      this.logger.log(`Disaster snapshot ${snapshot.id} ingested via ${source}`);
       return { snapshotId: snapshot.id };
     } catch (err) {
       await this.snapshotsRepo.update(snapshot.id, { status: 'FAILED' });
       throw err;
     }
+  }
+
+  /** Try each configured disaster source in priority order; throw if all fail. */
+  private async fetchDisastersWithFallback(): Promise<{
+    raw: unknown;
+    source: WeatherSource;
+  }> {
+    const errors: string[] = [];
+    for (const provider of this.disasterProviders) {
+      if (!provider.isConfigured()) {
+        this.logger.warn(`Skipping ${provider.code} (not configured)`);
+        continue;
+      }
+      try {
+        const raw = await provider.fetchEvents();
+        return { raw, source: provider.code };
+      } catch (err) {
+        const msg = `${provider.code}: ${(err as Error).message}`;
+        this.logger.warn(`Disaster source failed, trying next — ${msg}`);
+        errors.push(msg);
+      }
+    }
+    throw new Error(`All disaster sources failed [${errors.join(' | ')}]`);
   }
 
   // ---------------------------------------------------------------------------

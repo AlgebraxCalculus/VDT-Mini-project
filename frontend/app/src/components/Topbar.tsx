@@ -12,10 +12,10 @@ const ROLE_CHIP_LABEL: Record<Role, string> = {
   admin: 'Admin',
 };
 
-// Primary data sources (per product decision): Open-Meteo for forecast, NASA
-// EONET for disaster events. The other 3 (OWM, WeatherAPI, GDACS) are fallback,
-// so the Topbar health chip reflects ONLY these — fallback being down is fine.
-const PRIMARY_SOURCES = ['OpenMeteo', 'EONET'];
+// Primary data sources (per product decision): Open-Meteo for forecast, GDACS
+// for disaster events. The other 3 (OWM, WeatherAPI, EONET) are fallback, so the
+// Topbar health chip reflects ONLY these — fallback being down is fine.
+const PRIMARY_SOURCES = ['OpenMeteo', 'GDACS'];
 const HEALTH_POLL_MS = 60_000;
 
 type ChipState = 'ok' | 'degraded' | 'unknown';
@@ -98,7 +98,7 @@ export default function Topbar() {
       {/* Group F controls (primary-source health chip + manual refresh) — Admin only. */}
       {role === 'admin' && (
         <>
-          <div title="Nguồn chính: Open-Meteo, NASA EONET" style={{ display: 'flex', alignItems: 'center', gap: 8, height: 38, padding: '0 12px', borderRadius: 9, background: CHIP[chipState].bg, border: `1px solid ${CHIP[chipState].border}` }}>
+          <div title="Nguồn chính: Open-Meteo, GDACS" style={{ display: 'flex', alignItems: 'center', gap: 8, height: 38, padding: '0 12px', borderRadius: 9, background: CHIP[chipState].bg, border: `1px solid ${CHIP[chipState].border}` }}>
             <span style={{ width: 8, height: 8, borderRadius: '50%', background: CHIP[chipState].dot, boxShadow: chipState === 'ok' ? '0 0 0 3px rgba(22,163,74,.18)' : undefined }} />
             <span style={{ fontSize: 12.5, fontWeight: 600, color: CHIP[chipState].text }}>{CHIP[chipState].label}</span>
           </div>

@@ -337,7 +337,12 @@ curl -s -X POST http://localhost:3000/events/1/close \
 
 ## 10. Test API — Nhóm F (Thời tiết bên thứ 3) bằng Postman
 
-Nhóm F đồng bộ dữ liệu thời tiết từ 4 nguồn ngoài (Open-Meteo, OWM, WeatherAPI, GDACS) qua **async job (BullMQ)** rồi ghi `weather_snapshots` + `weather_forecasts`. Các endpoint **không trả dữ liệu ngay** mà trả `202 Accepted + jobId` — phải **poll** trạng thái job.
+Nhóm F đồng bộ dữ liệu thời tiết/thiên tai từ các nguồn ngoài qua **async job (BullMQ)** rồi ghi `weather_snapshots` + `weather_forecasts`. Các endpoint **không trả dữ liệu ngay** mà trả `202 Accepted + jobId` — phải **poll** trạng thái job.
+
+> **⚠️ Thay đổi nguồn (cập nhật 2026-06-28):**
+> - **Chuỗi dự báo (forecast)**: `Open-Meteo → MET Norway → WeatherAPI`. **Đã bỏ hẳn OpenWeatherMap** (provider + biến `OPENWEATHERMAP_*` đã xóa). Open-Meteo & MET Norway **không cần key**; chỉ WeatherAPI cần key.
+> - **Chuỗi thiên tai (disaster)**: `GDACS → ReliefWeb → EONET` (fallback theo thứ tự). ReliefWeb bị **bỏ qua** tới khi có `RELIEFWEB_APPNAME` → thực tế chạy `GDACS → EONET`.
+> - **Mực nước sông (river)**: lấy từ **GloFAS (Copernicus EWDS)** theo cron **ngày riêng** + trigger thủ công — xem **mục 10.6**.
 
 ### 10.1. Chuẩn bị `.env`
 
@@ -345,10 +350,12 @@ Nhóm F đồng bộ dữ liệu thời tiết từ 4 nguồn ngoài (Open-Meteo
 
 | Biến | Bắt buộc | Ghi chú |
 |------|----------|---------|
-| `OPENWEATHERMAP_API_KEY` | cho fallback OWM | Open-Meteo & GDACS không cần key |
-| `WEATHERAPI_KEY` | cho fallback WeatherAPI | |
-| `INTERNAL_API_TOKEN` | cho API 34 | Bí mật gửi qua header `X-Internal-Token`; **để trống = đóng endpoint** |
-| `WEATHER_CRON` / `WEATHER_HEALTHCHECK_CRON` | tùy chọn | Lịch cron ingest + healthcheck (mặc định mỗi giờ / 2 phút) |
+| `WEATHERAPI_KEY` | cho fallback WeatherAPI | Open-Meteo, MET Norway & GDACS/EONET không cần key |
+| `MET_NORWAY_USER_AGENT` | nên đặt | Điều khoản MET Norway **bắt buộc** User-Agent có liên hệ (vd `vtnet-flood-warning/1.0 (contact: email)`) |
+| `RELIEFWEB_APPNAME` | tùy chọn | `appname` đã duyệt (free) tại apidoc.reliefweb.int; trống → ReliefWeb bị skip |
+| `INTERNAL_API_TOKEN` | cho API 34 + GloFAS | Bí mật gửi qua header `X-Internal-Token`; **để trống = đóng endpoint** |
+| `EWDS_PAT` | cho GloFAS (river) | Personal Access Token từ ewds.climate.copernicus.eu (+ accept licence CEMS-FLOODS) |
+| `WEATHER_CRON` / `WEATHER_HEALTHCHECK_CRON` / `GLOFAS_CRON` | tùy chọn | Lịch cron ingest / healthcheck / GloFAS (mặc định mỗi giờ / 2 phút / 06:30 UTC ngày) |
 
 > Cần **Redis** đang chạy (`docker compose up -d redis`) — BullMQ + lock chống spam + cache healthcheck đều dùng Redis.
 
@@ -360,10 +367,12 @@ Nhóm F đồng bộ dữ liệu thời tiết từ 4 nguồn ngoài (Open-Meteo
 | 32 | GET | `/weather/refresh/:jobId` | OP/ADMIN | Trạng thái job + `snapshotId` khi xong |
 | 33 | GET | `/weather/snapshots/latest?source=` | Bearer | Snapshot mới nhất (lọc theo `source`) |
 | 34 | POST | `/internal/weather/ingest` | `X-Internal-Token` | Trigger ingest (scheduler-only, không dùng JWT) |
-| 35 | GET | `/integrations/health` | **ADMIN** | Trạng thái 4 nguồn (đọc từ Redis cache) |
+| 35 | GET | `/integrations/health` | **ADMIN** | Trạng thái các nguồn (đọc từ Redis cache) |
+| — | POST | `/internal/weather/glofas` | `X-Internal-Token` | **(Mới)** Trigger GloFAS lấy mực nước sông ngay — xem **mục 10.6** |
 
-- `source` ∈ `OpenMeteo | OpenWeatherMap | WeatherAPI | GDACS`. Bỏ trống ở API 31 → dùng fallback **Open-Meteo → OWM → WeatherAPI**; đặt `GDACS` → lấy dữ liệu thiên tai.
+- `source` ∈ `OpenMeteo | MetNorway | WeatherAPI | GDACS`. Bỏ trống ở API 31 → dùng fallback forecast **Open-Meteo → MET Norway → WeatherAPI**; đặt `GDACS` → chạy chuỗi thiên tai **GDACS → ReliefWeb → EONET**.
 - API 31 body (tùy chọn): `{ "stationIds": [..], "provinceIds": [..], "source": ".." }`. Bỏ trống → đồng bộ **toàn bộ trạm đang hoạt động**.
+- API 35 trả trạng thái mọi nguồn được khai báo: forecast (Open-Meteo, MET Norway, WeatherAPI), disaster (GDACS, ReliefWeb, EONET) và GloFAS. Nguồn thiếu key/appname → `status: "UNKNOWN", configured: false`.
 
 ### 10.3. Luồng test trên Postman
 
@@ -387,7 +396,7 @@ Tận dụng setup ở **mục 8.4** (đã lưu `{{access_token}}` ở cấp Col
 
 4. **(33) Xem snapshot** — `GET {{baseUrl}}/weather/snapshots/latest?source=OpenMeteo`. Kỳ vọng metadata snapshot (`status: "SUCCESS"`, `fetchedAt`, `rawPayload`).
 
-5. **(35) Healthcheck (Admin)** — `GET {{baseUrl}}/integrations/health` bằng token **ADMIN**. Sau ≥1 chu kỳ cron sẽ thấy `status/latencyMs/errorRate` của 4 nguồn (nguồn thiếu key → `status: "UNKNOWN", configured: false`).
+5. **(35) Healthcheck (Admin)** — `GET {{baseUrl}}/integrations/health` bằng token **ADMIN**. Sau ≥1 chu kỳ cron sẽ thấy `status/latencyMs/errorRate` của các nguồn (forecast + disaster + GloFAS); nguồn thiếu key/appname → `status: "UNKNOWN", configured: false`.
 
 6. **(34) Internal ingest** — `POST {{baseUrl}}/internal/weather/ingest`, **tắt** Bearer (chọn **No Auth**), thêm header:
 
@@ -418,6 +427,56 @@ FROM weather_forecasts WHERE snapshot_id = <id> ORDER BY forecast_time LIMIT 10;
 | Internal sai secret | `POST /internal/weather/ingest` thiếu/sai `X-Internal-Token` | `401 Unauthorized` |
 | Job không tồn tại | `GET /weather/refresh/khong-co` | `404 Not Found` |
 | Sai `source` | `?source=Foo` hoặc body `{"source":"Foo"}` | `400 Bad Request` |
+
+### 10.6. GloFAS — mực nước sông (river_water_level)
+
+Chuỗi forecast (Open-Meteo/MET Norway/WeatherAPI) **không** cho mực nước sông; Open-Meteo Flood API thì bị **chặn TCP** từ mạng VN. Vì vậy mực nước sông lấy riêng từ **GloFAS (Copernicus EWDS)** — một field GRIB2 dạng lưới, cập nhật **1 lần/ngày** nên chạy theo **cron ngày riêng** (`GLOFAS_CRON`, mặc định 06:30 UTC), tách khỏi chuỗi forecast theo giờ.
+
+**Luồng**: submit job `cems-glofas-forecast` cho bbox Việt Nam → poll job async → tải GRIB2 → **sidecar Python** (`scripts/glofas_extract.py`, dùng cfgrib — đã cài sẵn trong image) trích về từng trạm theo ô lưới gần nhất → ghi `weather_forecasts.river_water_level` của snapshot SUCCESS mới nhất → **republish `WEATHER_SNAPSHOT`** để Risk Engine tính lại kèm dữ liệu sông.
+
+**Quy đổi đơn vị (rating curve, KHÔNG đổi DB).** GloFAS trả **lưu lượng DISCHARGE (m³/s)** nhưng `flood_thresholds` là **mực nước STAGE (m)** với datum riêng từng trạm — so trực tiếp m³/s với m là vô nghĩa. Service quy đổi discharge → stage **trên thang ngưỡng riêng của từng trạm**, neo theo **dòng chảy nền** của chính ô lưới (min trong cửa sổ dự báo):
+
+- `Q = GLOFAS_ONSET_RATIO × nền` (mặc định 1.5×) → ứng với **BĐ1** (ngưỡng tier-1)
+- `Q = GLOFAS_DANGER_RATIO × nền` (mặc định 4×) → ứng với **BĐ3** (ngưỡng cao nhất)
+- log-linear ở giữa; độc lập magnitude (sông lớn & suối nhỏ đều xét theo dòng chảy nền của nó).
+
+Nhờ vậy không phải sửa `flood_thresholds`, hard-gate giữ nguyên. *(Chính xác tuyệt đối vẫn cần rating curve hiệu chỉnh theo trạm từ KTTV/NCHMF — bản hiện tại là proxy hợp lý, đúng thứ tự ưu tiên rủi ro.)*
+
+#### Test trên Postman
+
+Endpoint là **internal** (giống API 34): **No Auth** (bỏ Bearer) + header `X-Internal-Token`.
+
+1. **Trigger** — `POST {{baseUrl}}/internal/weather/glofas`, header `X-Internal-Token: <INTERNAL_API_TOKEN>`, **không** body. Kỳ vọng `202 { "started": true }`. Job chạy **bất đồng bộ** (vài phút: submit→poll→download→extract).
+2. **Theo dõi** qua log container (không có REST poll riêng):
+
+   ```bash
+   docker compose logs -f api | grep -i glofas
+   # ... GloFAS job <uuid> submitted; polling…
+   # ... GloFAS: river levels written for N stations on snapshot <id>
+   ```
+
+3. **Kiểm tra DB** — mực nước giờ ở thang **mét** (so được với ngưỡng), không còn là discharge nghìn-m³/s:
+
+   ```sql
+   -- Khoảng giá trị river giờ ~ mét (vd 0–135m), không còn ~ nghìn m³/s
+   SELECT min(river_water_level), max(river_water_level), round(avg(river_water_level)::numeric,2)
+   FROM weather_forecasts
+   WHERE snapshot_id = (SELECT max(id) FROM weather_snapshots
+                        WHERE status='SUCCESS' AND source_code NOT IN ('GDACS','EONET','ReliefWeb','GloFAS'))
+     AND river_water_level IS NOT NULL;
+
+   -- Trạm HIGH: mực nước dự báo (m) vượt ngưỡng riêng của trạm (m) một cách hợp lý
+   SELECT station_id, severity, risk_score,
+          round(predicted_water_level::numeric,2) AS river_m,
+          round(threshold_value::numeric,2) AS thr_m, is_exceeded
+   FROM station_risk_assessments
+   WHERE severity='HIGH' AND predicted_water_level IS NOT NULL
+   ORDER BY risk_score DESC LIMIT 10;
+   ```
+
+> Lưu ý cadence: GloFAS chạy theo ngày còn forecast theo giờ. Sau mỗi lần ingest forecast mới, river của snapshot mới sẽ NULL **cho tới** lần GloFAS kế (hoặc trigger thủ công). Khi đó severity sông có thể tạm tụt về LOW — chạy lại endpoint này để bù.
+>
+> **Lỗi thường gặp:** `403 required licences not accepted` → vào ewds.climate.copernicus.eu **accept licence CEMS-FLOODS**. `EWDS_PAT` trống → endpoint trả `202` nhưng log báo *skipped: EWDS_PAT not configured* (không ghi gì).
 
 ## 11. Test Realtime — WebSocket (Socket.IO, API 44–47)
 
@@ -454,7 +513,9 @@ Postman hỗ trợ request **Socket.IO** (New → Socket.IO).
 
 ### 11.3. Mô phỏng một `risk:delta`
 
-Risk Engine (Group G) — bên *phát* delta — **chưa được xây**, nên chưa có REST nào sinh ra `risk:delta`. Để kiểm thử đường đẩy, **publish thẳng vào kênh Redis** mà gateway lắng nghe (`risk.delta`):
+Risk Engine (Group G) — bên *phát* delta — **đã được xây** (xem **mục 12**). Cách tự nhiên để sinh `risk:delta` là kích hoạt một luồng tính lại rủi ro: `POST /weather/refresh` (API 31) hoặc `PUT /stations/:id/thresholds` (API 17). Khi engine tính xong, mọi trạm **đổi `risk_status`** sẽ phát `risk:delta` về đúng room tile chứa tọa độ trạm.
+
+Để kiểm thử **riêng đường đẩy** (không cần dữ liệu thời tiết), vẫn có thể **publish thẳng vào kênh Redis** mà gateway lắng nghe (`risk.delta`):
 
 ```bash
 # Tọa độ phải nằm trong BBOX bạn đã subscribe ở 11.2 thì client mới nhận được
@@ -473,7 +534,90 @@ Postman (đang subscribe viewport phủ điểm `(105.8, 21.0)`) sẽ nhận eve
 | Token đã thu hồi | Logout rồi connect lại bằng access token cũ | `connect_error` |
 | Delta ngoài viewport | Publish `risk.delta` với tọa độ ngoài BBOX đã subscribe | Client **không** nhận event |
 
-## 12. Sự cố thường gặp
+## 12. Test API — Nhóm G (Cảnh báo rủi ro 5–7 ngày & chi tiết khí tượng)
+
+Nhóm G gồm **Risk Engine** (tính rủi ro nền) + **4 API đọc** (36–39). Risk Engine **không có REST trigger**: nó là consumer trên event bus, tự chạy khi có `WEATHER_SNAPSHOT` / `THRESHOLD_CHANGED` / `EVENT_SCOPE_ASSIGNED` / `EVENT_CLOSED`, ghi sẵn bảng `station_risk_assessments` + `alert_histories`, cập nhật `stations.risk_status` và phát `risk:delta`. Các API đọc **chỉ truy vấn bảng đã tính sẵn** (không tính inline). Cần **Redis** đang chạy.
+
+### 12.1. Kích hoạt Risk Engine để có dữ liệu rủi ro
+
+Engine chạy nền nên trước khi gọi API 36/38 cần "mồi" một lượt tính. Hai cách:
+
+1. **Qua thời tiết (đầy đủ nhất)** — sau khi có ít nhất 1 snapshot `SUCCESS` (mục 10): gọi `POST /weather/refresh` → job xong → bus phát `WEATHER_SNAPSHOT` → engine tính **toàn bộ trạm** trong khung [hôm nay, +7 ngày]. Chỉ **một instance** chiếm lock `risk:recompute:lock` để tính (chống trùng khi chạy nhiều instance).
+2. **Qua đổi ngưỡng (1 trạm)** — `PUT /stations/:id/thresholds` (API 17) phát `THRESHOLD_CHANGED` → engine **tính lại đúng trạm đó** từ snapshot mới nhất.
+
+> Công thức 4 lớp (mưa R + nước sông V + độ cao E → `risk_score` ∈ [0,100] → severity/alert_level + cổng ngưỡng cứng). Trọng số hiểm họa qua `RISK_WEIGHT_RAIN` / `RISK_WEIGHT_RIVER` trong `.env` (mặc định 0.4 / 0.6, tự chuẩn hóa tổng = 1).
+
+### 12.2. Danh sách endpoint
+
+| # | Method | Endpoint | Auth | Mô tả |
+|---|--------|----------|------|-------|
+| 36 | GET | `/risk/stations?from=&to=&severity=&provinceId=&eventId=&sort=&page=&size=` | Bearer | Danh sách trạm nguy cơ 5–7 ngày (quét bảng tính sẵn) |
+| 37 | GET | `/forecasts/provinces/:id?from=&to=` | Bearer | Chuỗi dự báo tổng hợp cấp **tỉnh** |
+| 38 | GET | `/forecasts/stations/:id?from=&to=` | Bearer | Chuỗi dự báo điểm cấp **trạm** + phân loại theo ngưỡng |
+| 39 | GET | `/stations/:id/alert-history?page=&size=` | Bearer | Lịch sử cảnh báo (giá trị thực tế vs ngưỡng + lý do) |
+
+- Mọi endpoint **đọc** (Viewer+). `from`/`to` định dạng `YYYY-MM-DD`; bỏ trống → mặc định **[hôm nay, hôm nay + 7]**.
+- `severity` ∈ `LOW | MEDIUM | HIGH`. API 36 **bỏ trống severity** → chỉ trả trạm `severity <> LOW` (đúng nghĩa "nguy cơ"); truyền severity cụ thể để lọc hẹp.
+- `sort` ∈ `severity` (mặc định, `risk_score` giảm dần) | `timeline` (`forecast_date` tăng dần).
+- `eventId` là **BIGINT** (chuỗi) — lọc các bản ghi rủi ro gắn với 1 sự kiện.
+- API 38 phân loại **on-the-fly** từng ngày (severity/alertLevel/riskScore) chỉ để hiển thị — **không** ghi DB.
+
+### 12.3. Luồng test bằng `curl`
+
+Đặt sẵn `TOKEN="<access_token>"` như mục 8.3. Trước đó hãy chạy mục 12.1 để engine có dữ liệu.
+
+```bash
+# (36) Danh sách trạm nguy cơ trong 7 ngày tới, sắp theo độ nghiêm trọng
+curl -s "http://localhost:3000/risk/stations?sort=severity&page=1&size=20" \
+  -H "Authorization: Bearer $TOKEN"
+
+# (36) Lọc theo tỉnh + mức nghiêm trọng + khoảng ngày, sắp theo timeline
+curl -s "http://localhost:3000/risk/stations?provinceId=1&severity=HIGH&from=2026-06-27&to=2026-07-04&sort=timeline" \
+  -H "Authorization: Bearer $TOKEN"
+
+# (37) Dự báo tổng hợp cấp tỉnh (avg nhiệt độ/mưa/gió theo ngày)
+curl -s "http://localhost:3000/forecasts/provinces/1?from=2026-06-27&to=2026-07-04" \
+  -H "Authorization: Bearer $TOKEN"
+
+# (38) Dự báo điểm cấp trạm + phân loại cảnh báo theo ngưỡng của trạm
+curl -s "http://localhost:3000/forecasts/stations/1" \
+  -H "Authorization: Bearer $TOKEN"
+
+# (39) Lịch sử cảnh báo của trạm (actual vs threshold + reason)
+curl -s "http://localhost:3000/stations/1/alert-history?page=1&size=20" \
+  -H "Authorization: Bearer $TOKEN"
+```
+
+### 12.4. Kiểm tra dữ liệu engine ghi trong DB
+
+```sql
+-- Rủi ro tính sẵn cho timeline 5-7 ngày
+SELECT station_id, forecast_date, risk_score, severity, alert_level, is_exceeded
+FROM station_risk_assessments
+ORDER BY risk_score DESC LIMIT 10;
+
+-- Trạng thái rủi ro cache trên trạm (nguồn của risk:delta)
+SELECT id, name, risk_status FROM stations WHERE risk_status IS NOT NULL;
+
+-- Lịch sử cảnh báo (chỉ ghi khi leo thang lên WARNING/DANGER)
+SELECT station_id, alert_level, actual_value, threshold_value, reason, triggered_at
+FROM alert_histories ORDER BY triggered_at DESC LIMIT 10;
+```
+
+> Ghi chú: nếu `station_risk_assessments` rỗng sau khi refresh, kiểm tra snapshot có **forecast theo trạm** chưa (`weather_forecasts.station_id` khác NULL) — engine chỉ tính cho trạm có dữ liệu dự báo trong snapshot.
+
+### 12.5. Các ca kiểm thử nghiệp vụ (kỳ vọng lỗi)
+
+| Tình huống | Cách tái hiện | Kết quả mong đợi |
+|------------|---------------|------------------|
+| Sai `severity` | `?severity=Foo` | `400 Bad Request` |
+| Sai `sort` | `?sort=abc` | `400 Bad Request` |
+| Sai định dạng ngày | `?from=27-06-2026` | `400 Bad Request` |
+| Tỉnh không tồn tại | `GET /forecasts/provinces/99999` | `404 Not Found` |
+| Trạm không tồn tại | `GET /forecasts/stations/99999` hoặc `/stations/99999/alert-history` | `404 Not Found` |
+| Chưa có snapshot | Gọi API 37/38 khi chưa ingest thời tiết lần nào | `200` với `series: []` |
+
+## 13. Sự cố thường gặp
 
 - **`port 5432 already in use`**: đổi `POSTGRES_PORT` trong `.env` (ví dụ `5433`).
 - **API báo `ECONNREFUSED` tới DB**: kiểm tra service `db` đã `healthy` chưa (`docker compose ps`); API tự chờ healthcheck nên thường chỉ xảy ra khi DB lỗi khởi động.

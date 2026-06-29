@@ -3,12 +3,17 @@ import { JOBS } from '../data/mockData';
 import { apiGetIntegrationsHealth, ApiError, type SourceHealth } from '../lib/api';
 
 // Friendly VN label + description per backend source `code` (API 35 sends only the code).
+// Keys must match the WeatherSource codes in HEALTH_PROVIDERS (backend):
+// forecast chain Open-Meteo → MET Norway → WeatherAPI; disaster chain GDACS →
+// ReliefWeb → EONET; GloFAS supplies river water level.
 const SOURCE_META: Record<string, { name: string; desc: string }> = {
   OpenMeteo: { name: 'Open-Meteo', desc: 'Dự báo thời tiết · nguồn chính' },
-  OpenWeatherMap: { name: 'OpenWeatherMap', desc: 'Dự báo · dự phòng #1' },
+  MetNorway: { name: 'MET Norway (Yr)', desc: 'Dự báo · dự phòng #1' },
   WeatherAPI: { name: 'WeatherAPI.com', desc: 'Dự báo · dự phòng #2' },
-  GDACS: { name: 'GDACS', desc: 'Cảnh báo thiên tai toàn cầu' },
-  EONET: { name: 'NASA EONET', desc: 'Sự kiện thiên tai · thay thế GDACS' },
+  GDACS: { name: 'GDACS', desc: 'Cảnh báo thiên tai · nguồn chính' },
+  ReliefWeb: { name: 'ReliefWeb (UN OCHA)', desc: 'Thiên tai · dự phòng #1' },
+  EONET: { name: 'NASA EONET', desc: 'Thiên tai · dự phòng #2' },
+  GloFAS: { name: 'GloFAS (Copernicus)', desc: 'Mực nước sông · cập nhật theo ngày' },
 };
 
 // A source that is UP but slower than this (ms) is surfaced as "Phản hồi chậm".

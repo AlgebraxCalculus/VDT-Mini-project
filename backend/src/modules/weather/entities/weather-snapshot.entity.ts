@@ -19,6 +19,12 @@ export enum WeatherSource {
   EONET = 'EONET',
   OPEN_WEATHER_MAP = 'OpenWeatherMap',
   WEATHER_API = 'WeatherAPI',
+  /** MET Norway (Yr) — keyless forecast fallback, reachable where others are blocked. */
+  MET_NORWAY = 'MetNorway',
+  /** ReliefWeb (UN OCHA) — disaster-event source; replaces network-blocked GDACS/EONET. */
+  RELIEFWEB = 'ReliefWeb',
+  /** Copernicus EWDS GloFAS — daily river discharge; fills river_water_level (proxy). */
+  GLOFAS = 'GloFAS',
 }
 
 export enum SnapshotTrigger {

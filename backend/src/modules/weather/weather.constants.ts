@@ -18,4 +18,5 @@ export const HEALTH_KEY_PREFIX = 'integrations:health:';
 
 /** DI tokens for the ordered provider collections. */
 export const FORECAST_PROVIDERS = Symbol('FORECAST_PROVIDERS');
+export const DISASTER_PROVIDERS = Symbol('DISASTER_PROVIDERS');
 export const HEALTH_PROVIDERS = Symbol('HEALTH_PROVIDERS');

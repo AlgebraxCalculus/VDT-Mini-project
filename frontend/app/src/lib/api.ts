@@ -3,7 +3,17 @@
 // header, and a one-shot refresh on 401 so an expired access token is
 // transparently rotated mid-session.
 
-import type { ProvinceRef, RiskStatus, Station, Threshold } from '../types';
+import type {
+  AlertHistoryEntry,
+  ClassifiedForecastPoint,
+  ForecastPoint,
+  ProvinceRef,
+  RiskAssessment,
+  RiskSeverity,
+  RiskStatus,
+  Station,
+  Threshold,
+} from '../types';
 
 const API_BASE = (
   (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:3000'
@@ -414,3 +424,112 @@ export interface WeatherJobStatus {
 /** API 32 — GET /weather/refresh/{jobId}. */
 export const apiGetWeatherJob = (jobId: string) =>
   request<WeatherJobStatus>(`/weather/refresh/${jobId}`);
+
+// ---------------------------------------------------------------------------
+// Group G — Risk engine read side (APIs 36–39). All read-only, Viewer+.
+//   • 36 GET /risk/stations              — paginated at-risk stations
+//   • 37 GET /forecasts/provinces/{id}   — province forecast series
+//   • 38 GET /forecasts/stations/{id}    — station forecast series (classified)
+//   • 39 GET /stations/{id}/alert-history — paginated alert history
+// Response shapes mirror risk.service.ts; risk_score is on the 0–100 scale.
+// ---------------------------------------------------------------------------
+
+/** Sort key for GET /risk/stations — highest score first, or nearest in time. */
+export type RiskSort = 'severity' | 'timeline';
+
+export interface ListRiskStationsParams {
+  /** Inclusive forecast-window bounds (YYYY-MM-DD); default [today, today+7]. */
+  from?: string;
+  to?: string;
+  severity?: RiskSeverity;
+  /** Include LOW-severity rows (default hidden). Ignored if `severity` is set. */
+  includeLow?: boolean;
+  provinceId?: number;
+  /** disaster_events.id — BIGINT, sent as a numeric string. */
+  eventId?: string;
+  sort?: RiskSort;
+  page?: number;
+  size?: number;
+}
+
+export interface PaginatedRiskAssessments {
+  data: RiskAssessment[];
+  total: number;
+  page: number;
+  size: number;
+}
+
+export interface ProvinceForecast {
+  provinceId: number;
+  from: string;
+  to: string;
+  series: ForecastPoint[];
+}
+
+export interface StationForecast {
+  stationId: number;
+  from: string;
+  to: string;
+  series: ClassifiedForecastPoint[];
+}
+
+export interface PaginatedAlertHistory {
+  data: AlertHistoryEntry[];
+  total: number;
+  page: number;
+  size: number;
+}
+
+/** API 36 — GET /risk/stations. Excludes LOW unless `severity` is given. */
+export function apiListRiskStations(
+  params: ListRiskStationsParams = {},
+): Promise<PaginatedRiskAssessments> {
+  const qs = new URLSearchParams();
+  if (params.from) qs.set('from', params.from);
+  if (params.to) qs.set('to', params.to);
+  if (params.severity) qs.set('severity', params.severity);
+  if (params.includeLow) qs.set('includeLow', 'true');
+  if (params.provinceId != null) qs.set('provinceId', String(params.provinceId));
+  if (params.eventId) qs.set('eventId', params.eventId);
+  if (params.sort) qs.set('sort', params.sort);
+  qs.set('page', String(params.page ?? 1));
+  qs.set('size', String(params.size ?? 20));
+  return request<PaginatedRiskAssessments>(`/risk/stations?${qs.toString()}`);
+}
+
+/** API 37 — GET /forecasts/provinces/{id}. Optional date window. */
+export function apiGetProvinceForecast(
+  provinceId: number,
+  params: { from?: string; to?: string } = {},
+): Promise<ProvinceForecast> {
+  const qs = new URLSearchParams();
+  if (params.from) qs.set('from', params.from);
+  if (params.to) qs.set('to', params.to);
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return request<ProvinceForecast>(`/forecasts/provinces/${provinceId}${suffix}`);
+}
+
+/** API 38 — GET /forecasts/stations/{id}. Each day classified server-side. */
+export function apiGetStationForecast(
+  stationId: number,
+  params: { from?: string; to?: string } = {},
+): Promise<StationForecast> {
+  const qs = new URLSearchParams();
+  if (params.from) qs.set('from', params.from);
+  if (params.to) qs.set('to', params.to);
+  const suffix = qs.toString() ? `?${qs.toString()}` : '';
+  return request<StationForecast>(`/forecasts/stations/${stationId}${suffix}`);
+}
+
+/** API 39 — GET /stations/{id}/alert-history. Newest-first, paginated. */
+export function apiGetStationAlertHistory(
+  stationId: number,
+  params: { page?: number; size?: number } = {},
+): Promise<PaginatedAlertHistory> {
+  const qs = new URLSearchParams();
+  qs.set('page', String(params.page ?? 1));
+  qs.set('size', String(params.size ?? 20));
+  return request<PaginatedAlertHistory>(
+    `/stations/${stationId}/alert-history?${qs.toString()}`,
+  );
+}

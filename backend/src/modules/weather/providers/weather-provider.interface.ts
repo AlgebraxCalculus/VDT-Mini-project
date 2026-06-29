@@ -22,9 +22,18 @@ export interface HealthCheckable {
 
 /**
  * A source that returns a 5–7 day weather time-series. Ordered into the fallback
- * chain Open-Meteo → OWM → WeatherAPI. `fetchForecast` throws on failure so the
- * ingestion flow falls through to the next configured provider.
+ * chain Open-Meteo → MET Norway → WeatherAPI. `fetchForecast` throws on failure so
+ * the ingestion flow falls through to the next configured provider.
  */
 export interface ForecastProvider extends HealthCheckable {
   fetchForecast(targets: ForecastTarget[], days: number): Promise<ForecastResult>;
+}
+
+/**
+ * A disaster-event source. Ordered into the fallback chain GDACS → ReliefWeb →
+ * EONET. `fetchEvents` throws on failure so the disaster-ingest flow falls through
+ * to the next configured source. The raw payload is stored on the snapshot.
+ */
+export interface DisasterProvider extends HealthCheckable {
+  fetchEvents(): Promise<unknown>;
 }

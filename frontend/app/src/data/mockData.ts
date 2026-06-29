@@ -1,22 +1,27 @@
 import type {
   Account,
+  AlertHistoryEntry,
   BgJob,
+  ClassifiedForecastPoint,
   EventItem,
   ForecastDay,
   ImportRow,
   Notif,
   ProvinceRef,
+  RiskSeverity,
   RiskStatus,
   ServiceStatus,
   Station,
   Threshold,
 } from '../types';
 
+// All risk scores are on the backend 0–100 scale (station_risk_assessments.
+// risk_score). Band boundaries mirror the engine's classifier: 30 / 60 / 80.
 export function band(r: number): [string, string] {
-  if (r < 1) return ['Thấp', '#94A3B8'];
-  if (r < 3) return ['Chú ý', '#16A34A'];
-  if (r < 5) return ['Trung bình', '#EAB308'];
-  if (r < 7) return ['Cao', '#F97316'];
+  if (r < 10) return ['Thấp', '#94A3B8'];
+  if (r < 30) return ['Chú ý', '#16A34A'];
+  if (r < 60) return ['Trung bình', '#EAB308'];
+  if (r < 80) return ['Cao', '#F97316'];
   return ['Rất cao', '#EE0033'];
 }
 
@@ -67,29 +72,43 @@ export const riskMeta = (rs: RiskStatus | null) => RISK_META[rs ?? 'NORMAL'];
 export const thresholdAt = (thresholds: Threshold[], level: 1 | 2 | 3): number | null =>
   thresholds.find((t) => t.alertLevel === level)?.thresholdValue ?? null;
 
-/** Mock-only: derive the RiskStatus enum from the 0–10 display score. */
+/**
+ * Derive the RiskStatus enum from the 0–100 risk score — mirrors the engine's
+ * classifyScore → alertLevel → RiskStatus chain (<30 NORMAL, <60 WATCH,
+ * <80 WARNING, ≥80 DANGER).
+ */
 function statusFromScore(r: number): RiskStatus {
-  if (r >= 7) return 'DANGER';
-  if (r >= 5) return 'WARNING';
-  if (r >= 3) return 'WATCH';
+  if (r >= 80) return 'DANGER';
+  if (r >= 60) return 'WARNING';
+  if (r >= 30) return 'WATCH';
   return 'NORMAL';
 }
 
 /**
- * Map a 0–10 flood-risk score to its legend band (colour + label) — mirrors the
- * "Chỉ số rủi ro lũ" bands in FLOOD_LEGEND (<1 Thấp, 1–3 Chú ý, 3–5 Trung bình,
- * 5–7 Cao, ≥7 Rất cao). Used to colour the map dots by score.
+ * Derive the RiskSeverity bucket from the 0–100 risk score — mirrors the
+ * engine's classifyScore (<30 LOW, <60 MEDIUM, ≥60 HIGH).
+ */
+function severityFromScore(r: number): RiskSeverity {
+  if (r >= 60) return 'HIGH';
+  if (r >= 30) return 'MEDIUM';
+  return 'LOW';
+}
+
+/**
+ * Map a 0–100 flood-risk score to its legend band (colour + label) — mirrors the
+ * "Chỉ số rủi ro lũ" bands in FLOOD_LEGEND (<10 Thấp, 10–30 Chú ý, 30–60 Trung
+ * bình, 60–80 Cao, ≥80 Rất cao). Used to colour the map dots by score.
  */
 export function floodLevel(score: number): { color: string; label: string } {
-  if (score >= 7) return { color: '#EE0033', label: 'Rất cao' };
-  if (score >= 5) return { color: '#F97316', label: 'Cao' };
-  if (score >= 3) return { color: '#EAB308', label: 'Trung bình' };
-  if (score >= 1) return { color: '#16A34A', label: 'Chú ý' };
+  if (score >= 80) return { color: '#EE0033', label: 'Rất cao' };
+  if (score >= 60) return { color: '#F97316', label: 'Cao' };
+  if (score >= 30) return { color: '#EAB308', label: 'Trung bình' };
+  if (score >= 10) return { color: '#16A34A', label: 'Chú ý' };
   return { color: '#94A3B8', label: 'Thấp' };
 }
 
 /**
- * Mock-only: a stable pseudo flood-risk score in [0,10) for a station, used until
+ * Mock-only: a stable pseudo flood-risk score in [0,100) for a station, used until
  * the Risk Engine populates station_risk_assessments.risk_score (which the
  * viewport API will then surface as `riskScore`). Deterministic from the id so
  * colours stay put across refetches and all five legend bands are visible on the
@@ -97,7 +116,7 @@ export function floodLevel(score: number): { color: string; label: string } {
  */
 export function mockRiskScore(id: number): number {
   const x = Math.sin(id * 12.9898) * 43758.5453;
-  return Math.round((x - Math.floor(x)) * 1000) / 100; // 0.00–9.99
+  return Math.round((x - Math.floor(x)) * 10000) / 100; // 0.00–99.99
 }
 
 // stationCode, name, province, lat, lng, riskScore, temp, rain, wind, humid
@@ -159,8 +178,10 @@ const ELEV: Record<string, number> = {
 
 function computeStations(): Station[] {
   return STATIONS_RAW.map((s, i) => {
-    const score = s[5];
-    const base = score >= 7 ? 7.5 : score >= 5 ? 7.0 : 6.5;
+    // Raw scores are authored on a 0–10 scale; lift to the backend 0–100 scale.
+    const score = Math.round(s[5] * 10);
+    // River-level thresholds (metres) — independent of the risk score.
+    const base = s[5] >= 7 ? 7.5 : s[5] >= 5 ? 7.0 : 6.5;
     const thresholds: Threshold[] = [
       { alertLevel: 1, thresholdValue: +(base - 2).toFixed(1), label: 'Chú ý' },
       { alertLevel: 2, thresholdValue: +base.toFixed(1), label: 'Cảnh báo' },
@@ -180,6 +201,7 @@ function computeStations(): Station[] {
       thresholds,
       weather: { temp: s[6], rain: s[7], wind: s[8], humid: s[9] },
       riskScore: score,
+      severity: severityFromScore(score),
     };
   });
 }
@@ -191,11 +213,118 @@ export function forecast7d(base: number): ForecastDay[] {
   let v = base;
   const out: ForecastDay[] = [];
   for (let i = 0; i < 7; i++) {
-    v = Math.max(0.4, Math.min(10, v + Math.sin(i * 1.3) * 1.6 + (i === 2 ? 1.4 : 0) - (i > 4 ? 1.0 : 0)));
+    v = Math.max(4, Math.min(100, v + Math.sin(i * 1.3) * 16 + (i === 2 ? 14 : 0) - (i > 4 ? 10 : 0)));
     const [, color] = band(v);
-    out.push({ day: days[i], val: +v.toFixed(1), color, h: 8 + v * 7 + 'px' });
+    out.push({ day: days[i], val: Math.round(v), color, h: 8 + v * 0.7 + 'px' });
   }
   return out;
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Backend-shaped per-station mock (APIs 38 & 39). These mirror the exact return
+// shapes of apiGetStationForecast / apiGetStationAlertHistory, so the map detail
+// panel runs on mock now and swaps to the real API by changing only the call
+// site. Promise-returning on purpose — same async signature as the API.
+// ───────────────────────────────────────────────────────────────────────────
+
+const DOW = ['CN', 'T2', 'T3', 'T4', 'T5', 'T6', 'T7'];
+/** Short Vietnamese weekday label for a YYYY-MM-DD / ISO date. */
+export const forecastDayLabel = (iso: string) => DOW[new Date(iso).getDay()] ?? '';
+
+// Deterministic [0,1) noise from any seed — keeps mock values stable per station.
+function noise(seed: number): number {
+  const x = Math.sin(seed * 91.7) * 43758.5453;
+  return x - Math.floor(x);
+}
+
+// Score → alert level, matching the engine's bands (<30→0, <60→1, <80→2, ≥80→3).
+const alertLevelFromScore = (score: number): number =>
+  score >= 80 ? 3 : score >= 60 ? 2 : score >= 30 ? 1 : 0;
+
+/**
+ * API 38 mock — GET /forecasts/stations/{id}. A 7-day series of
+ * ClassifiedForecastPoint, each day classified (severity / alertLevel /
+ * isExceeded / riskScore) the way the Risk Engine would, with the hard-gate
+ * threshold check. Anchored on the station's risk score + thresholds so the
+ * numbers stay coherent with the map dots.
+ */
+export function mockStationForecast(station: Station): Promise<{
+  stationId: number;
+  from: string;
+  to: string;
+  series: ClassifiedForecastPoint[];
+}> {
+  const w = station.weather;
+  const thr1 = thresholdAt(station.thresholds, 1);
+  const thr2 = thresholdAt(station.thresholds, 2);
+  const anchor = thr2 ?? 6.5;
+  const baseTemp = w?.temp ?? 24 + noise(station.id) * 6 - 3;
+  const baseWind = w?.wind ?? 2 + noise(station.id * 3) * 6;
+  const today = new Date();
+  const series: ClassifiedForecastPoint[] = [];
+  let v = station.riskScore ?? mockRiskScore(station.id);
+  for (let i = 0; i < 7; i++) {
+    v = Math.max(4, Math.min(100, v + Math.sin(i * 1.3) * 16 + (i === 2 ? 14 : 0) - (i > 4 ? 10 : 0)));
+    const score = Math.round(v);
+    const d = new Date(today);
+    d.setDate(today.getDate() + i);
+    const date = d.toISOString().slice(0, 10);
+    const n = noise(station.id * 31 + i);
+    const riverWaterLevel = Math.round((anchor - 1.2 + (score / 100) * 2.8) * 100) / 100;
+    const alertByThreshold =
+      thr2 != null && riverWaterLevel >= thr2 ? 2 : thr1 != null && riverWaterLevel >= thr1 ? 1 : 0;
+    const alertLevel = Math.max(alertLevelFromScore(score), alertByThreshold);
+    series.push({
+      date,
+      temperature: Math.round((baseTemp + Math.sin(i) * 2) * 10) / 10,
+      rainfall: Math.round((score * 1.5 + n * 18) * 10) / 10,
+      windSpeed: Math.round((baseWind + n * 3) * 10) / 10,
+      windDirection: Math.round(n * 360),
+      riverWaterLevel,
+      severity: severityFromScore(score),
+      alertLevel,
+      isExceeded: alertByThreshold > 0,
+      riskScore: score,
+    });
+  }
+  return Promise.resolve({ stationId: station.id, from: series[0].date, to: series[6].date, series });
+}
+
+/**
+ * API 39 mock — GET /stations/{id}/alert-history. Newest-first immutable alert
+ * records (actual vs threshold + reason). Record count scales with risk.
+ */
+export function mockStationAlertHistory(station: Station): Promise<{
+  data: AlertHistoryEntry[];
+  total: number;
+  page: number;
+  size: number;
+}> {
+  const base = station.riskScore ?? mockRiskScore(station.id);
+  const threshold = thresholdAt(station.thresholds, 2) ?? 7.0;
+  const peak = alertLevelFromScore(base) || 1;
+  const count = base >= 60 ? 3 : base >= 30 ? 2 : 1;
+  const now = Date.now();
+  const data: AlertHistoryEntry[] = [];
+  for (let i = 0; i < count; i++) {
+    const level = Math.max(1, peak - i);
+    const ts = new Date(now - ((i + 1) * 6 + noise(station.id + i) * 4) * 3_600_000).toISOString();
+    const actualValue =
+      Math.round((threshold + (level - 1) * 0.6 + noise(station.id * 7 + i) * 0.5) * 100) / 100;
+    data.push({
+      id: `${station.id}-AH-${i}`,
+      stationId: station.id,
+      eventId: null,
+      alertLevel: level,
+      triggeredAt: ts,
+      actualValue,
+      thresholdValue: threshold,
+      reason: `Mực nước ${actualValue}m vượt ngưỡng cấp ${level} (${threshold}m)`,
+      weatherSnapshotId: null,
+      createdAt: ts,
+    });
+  }
+  return Promise.resolve({ data, total: data.length, page: 1, size: 20 });
 }
 
 export const EVENTS: EventItem[] = [
@@ -339,11 +468,11 @@ export const EV_TYPE_OPTIONS = ['Bão', 'Áp thấp nhiệt đới', 'Mưa lớn
 export const EV_SEV_OPTIONS = ['Thấp', 'Trung bình', 'Cao', 'Rất cao'];
 
 export const FLOOD_LEGEND = [
-  { c: '#94A3B8', label: 'Thấp', range: '<1' },
-  { c: '#16A34A', label: 'Chú ý', range: '1–3' },
-  { c: '#EAB308', label: 'Trung bình', range: '3–5' },
-  { c: '#F97316', label: 'Cao', range: '5–7' },
-  { c: '#EE0033', label: 'Rất cao', range: '≥7' },
+  { c: '#94A3B8', label: 'Thấp', range: '<10' },
+  { c: '#16A34A', label: 'Chú ý', range: '10–30' },
+  { c: '#EAB308', label: 'Trung bình', range: '30–60' },
+  { c: '#F97316', label: 'Cao', range: '60–80' },
+  { c: '#EE0033', label: 'Rất cao', range: '≥80' },
 ];
 
 export const WEATHER_LEGENDS: Record<string, { title: string; gradient: string; ticks: string[] }> = {
