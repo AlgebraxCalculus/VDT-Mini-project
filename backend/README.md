@@ -2,6 +2,24 @@
 
 Hướng dẫn chạy **database (PostgreSQL + PostGIS)** và **API NestJS** bằng Docker.
 
+## 0. Thay đổi gần đây
+
+### Nhóm C — Import trạm hàng loạt (API 18–19) *(mới nhất)*
+
+- **Thêm API 18** `POST /stations/import` (OP/ADMIN) — upload **CSV** dạng multipart (field `file`, ≤5 MB, ≤10.000 dòng). Backend validate *hình dạng* file đồng bộ (trả `400` nếu hỏng) rồi đẩy **BullMQ job** (queue riêng `stations-import`, `attempts: 1`) → `202 { jobId }`. Worker validate từng dòng + insert theo **lô 1.000/transaction**, tự gán tỉnh bằng `ST_Contains`, **bỏ qua dòng lỗi** (gom vào report).
+- **Thêm API 19** `GET /stations/import/:jobId` — trạng thái job + `progress` + `report` (số thành công/lỗi + danh sách dòng bị bỏ qua).
+- Chi tiết + hướng dẫn test: **mục [9.4](#94-nhóm-c--import-trạm-hàng-loạt-api-1819)**.
+- **Frontend (ngoài phạm vi README này):** realtime WebSocket client (API 44–47, `src/lib/realtime.ts`) và view Import đã được nối vào UI.
+
+### Nhóm D — Sự kiện thiên tai (tracking tự động)
+
+- **Gỡ API 22** (`POST /events` tạo thủ công). Sự kiện nay **tracking tự động** từ GDACS qua `EventIngestionService` (cron `DISASTER_CRON`): parse hazard STORM/FLOOD liên quan VN → upsert `disaster_events` (dedupe theo `event_code`) → **tự gán scope N–N** (`event_provinces`/`event_stations`, raw PostGIS) → publish `EVENT_SCOPE_ASSIGNED`; sự kiện rớt feed tự `CLOSED`.
+- **Thêm API 25** `POST /events/:id/impact` (OP/ADMIN) — gán/ghi đè phạm vi thủ công (`provinceIds` và/hoặc `affectedArea` GeoJSON), thay thế scope auto.
+- **Thêm API 26** `GET /events/:id/stations` (Bearer) — xem tỉnh + trạm trong phạm vi (phân trang).
+- **Thêm** endpoint nội bộ `POST /internal/events/ingest` (`X-Internal-Token`) để kích hoạt ingest GDACS ngay.
+- **Biến `.env` mới:** `DISASTER_CRON`, `DISASTER_STORM_RADIUS_DEG`, `DISASTER_FLOOD_RADIUS_DEG`.
+- Chi tiết + hướng dẫn test: **mục [9.2](#92-nhóm-d--events-sự-kiện-thiên-tai--tracking-tự-động)**.
+
 ## 1. Yêu cầu
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) (đã bật, có `docker compose`)
@@ -283,43 +301,94 @@ curl -s -o /dev/null -w "%{http_code}\n" -X DELETE http://localhost:3000/station
   -H "Authorization: Bearer $TOKEN"
 ```
 
-### 9.2. Nhóm D — `/events` (Quản lý sự kiện thiên tai)
+### 9.2. Nhóm D — `/events` (Sự kiện thiên tai — **tracking tự động**)
+
+> **⚠️ Thay đổi thiết kế (so với bản trước):** API **22 (`POST /events` tạo thủ công) đã bị GỠ**. Sự kiện thiên tai nay được **theo dõi tự động** từ chuỗi nguồn disaster (GDACS → ReliefWeb → EONET; hiện chạy **GDACS**) bởi `EventIngestionService` (`src/modules/events/ingestion/`):
+> 1. Cron `DISASTER_CRON` kéo feed GDACS events4app, parser giữ lại hazard **STORM/FLOOD** liên quan Việt Nam (giao cắt không gian với bảng `provinces`).
+> 2. **Upsert** `disaster_events` theo `event_code` dạng `GDACS-TC1000810` (chống trùng tự nhiên).
+> 3. **Tự gán phạm vi N–N**: ghi `event_provinces` (đa giác footprint đã clip) + `event_stations` bằng raw PostGIS, rồi publish `EVENT_SCOPE_ASSIGNED` → Risk Engine tính lại các trạm vừa gán.
+> 4. Sự kiện rớt khỏi feed → tự chuyển `ONGOING → CLOSED` + publish `EVENT_CLOSED`.
 
 | # | Method | Endpoint | Auth | Mô tả |
 |---|--------|----------|------|-------|
 | 20 | GET | `/events?status=&page=&size=` | Bearer | Danh sách sự kiện + số tỉnh/trạm trong phạm vi |
 | 21 | GET | `/events/:id` | Bearer | Chi tiết sự kiện |
-| 22 | POST | `/events` | OP/ADMIN | Tạo sự kiện; trạng thái `ONGOING`, tự sinh `event_code` |
-| 23 | PUT | `/events/:id` | OP/ADMIN | Sửa thông tin mô tả (bị **khóa** nếu đã `CLOSED`) |
+| 23 | PUT | `/events/:id` | OP/ADMIN | Sửa mô tả (bị **khóa** nếu đã `CLOSED`) |
 | 24 | POST | `/events/:id/close` | OP/ADMIN | Đóng sự kiện (`ONGOING → CLOSED`) |
+| **25** | **POST** | **`/events/:id/impact`** | **OP/ADMIN** | **Gán/ghi đè phạm vi thủ công** (`provinceIds[]` và/hoặc `affectedArea` GeoJSON) — *thay thế* scope auto, publish `EVENT_SCOPE_ASSIGNED` |
+| **26** | **GET** | **`/events/:id/stations`** | **Bearer** | **Xem phạm vi**: tỉnh + danh sách trạm (phân trang) trong scope |
+| — | POST | `/internal/events/ingest` | `X-Internal-Token` | (scheduler-only) Chạy 1 lượt ingest GDACS **ngay**; trả summary |
 
-- `status` ∈ `ONGOING | CLOSED`. `CLOSED` là trạng thái cuối, không sửa được nữa.
-- Chặn trùng: không cho tồn tại 2 sự kiện **cùng `disasterTypeId`** đang `ONGOING` (→ `409`).
+- `status` ∈ `ONGOING | CLOSED`. `CLOSED` là trạng thái cuối, không sửa được.
 - `id` sự kiện là **BIGINT** (truyền dạng chuỗi).
+- **API 25 — hai chế độ** (ít nhất một trong hai, nếu thiếu cả hai → `400`):
+  - **Chỉ tỉnh:** `provinceIds[]` → trạm gán theo `stations.province_id`, `affected_area = NULL`.
+  - **Polygon:** `affectedArea` (GeoJSON `Polygon`/`MultiPolygon`, SRID 4326) → tỉnh giao cắt + trạm nằm trong vùng; kèm `provinceIds` để giới hạn thêm.
+  - Mỗi lần gọi **xóa toàn bộ scope cũ rồi ghi lại** (authoritative override). Khóa khi sự kiện `CLOSED` (→ `403`).
 
 ```bash
-# (22) Tạo sự kiện (disasterTypeId tham chiếu bảng disaster_types: 1=STORM, 2=FLOOD...)
-curl -s -X POST http://localhost:3000/events \
-  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"disasterTypeId":1,"name":"Bão số 3","startTime":"2026-06-23T00:00:00Z","description":"Bão đổ bộ ven biển Bắc Bộ"}'
+# Xuất token nội bộ (trùng INTERNAL_API_TOKEN trong .env)
+export INTERNAL_TOKEN=change_me_internal_token
 
-# (20) Danh sách sự kiện đang diễn ra
+# (internal) Kích hoạt ingest GDACS NGAY — không cần đợi cron
+curl -s -X POST http://localhost:3000/internal/events/ingest \
+  -H "X-Internal-Token: $INTERNAL_TOKEN"
+# -> { "created": n, "updated": n, "scopedStations": n, "closed": n }
+
+# (20) Danh sách sự kiện đang diễn ra (sau khi ingest có dữ liệu)
 curl -s "http://localhost:3000/events?status=ONGOING&page=1&size=20" \
   -H "Authorization: Bearer $TOKEN"
+# -> lấy "id" của một sự kiện, gán vào biến shell để dùng tiếp:
+export EV=<ID>
 
 # (21) Chi tiết sự kiện
-curl -s http://localhost:3000/events/1 -H "Authorization: Bearer $TOKEN"
+curl -s http://localhost:3000/events/$EV -H "Authorization: Bearer $TOKEN"
+
+# (26) Xem phạm vi: tỉnh + trạm (phân trang)
+curl -s "http://localhost:3000/events/$EV/stations?page=1&size=20" \
+  -H "Authorization: Bearer $TOKEN"
+
+# (25) Gán phạm vi thủ công — CHẾ ĐỘ TỈNH (ghi đè scope + kích hoạt Risk Engine)
+curl -s -X POST http://localhost:3000/events/$EV/impact \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"provinceIds":[1,2,3]}'
+
+# (25) Gán phạm vi thủ công — CHẾ ĐỘ POLYGON (GeoJSON, vành khép kín)
+curl -s -X POST http://localhost:3000/events/$EV/impact \
+  -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"affectedArea":{"type":"Polygon","coordinates":[[[105.6,18.4],[107.1,18.2],[108.6,16.3],[107.6,15.2],[105.6,18.4]]]}}'
 
 # (23) Cập nhật mô tả (chỉ khi chưa CLOSED)
-curl -s -X PUT http://localhost:3000/events/1 \
+curl -s -X PUT http://localhost:3000/events/$EV \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
-  -d '{"description":"Cập nhật hướng di chuyển của bão"}'
+  -d '{"description":"Ghi chú vận hành"}'
 
 # (24) Đóng sự kiện
-curl -s -X POST http://localhost:3000/events/1/close \
+curl -s -X POST http://localhost:3000/events/$EV/close \
   -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
   -d '{"endTime":"2026-06-25T12:00:00Z"}'
 ```
+
+**Seed thủ công khi GDACS không có hazard VN tại thời điểm test** (để vẫn test được API 23–26):
+
+```sql
+-- chạy: docker compose exec db psql -U flood -d flood_warning
+INSERT INTO disaster_types (code, name) VALUES ('STORM','Bão')
+  ON CONFLICT (code) DO NOTHING;
+INSERT INTO disaster_events (event_code, disaster_type_id, name, status, start_time, created_by)
+VALUES ('TEST-STORM-001', (SELECT id FROM disaster_types WHERE code='STORM'),
+        'Bão thử nghiệm', 'ONGOING', now(), NULL);
+SELECT id, event_code, name FROM disaster_events WHERE event_code='TEST-STORM-001';
+-- dùng id trả về làm $EV; sau đó gọi (25) chế độ tỉnh để khoanh vùng + sinh event_stations.
+```
+
+**Test trên Postman (Nhóm D):**
+
+1. Dùng lại Bearer token đã lấy ở mục 8.4 (Authorization → Bearer Token = `{{access_token}}`).
+2. Tạo request `POST {{baseUrl}}/internal/events/ingest`, tab **Headers** thêm `X-Internal-Token: {{internalToken}}` (không cần Bearer) → chạy để có dữ liệu.
+3. `GET {{baseUrl}}/events?status=ONGOING` → copy một `id` vào biến môi trường `eventId`.
+4. `GET {{baseUrl}}/events/{{eventId}}/stations?page=1&size=20` → kiểm tra mảng `provinces` + `stations.data`.
+5. `POST {{baseUrl}}/events/{{eventId}}/impact` (Body → raw → JSON) với `{"provinceIds":[1,2,3]}` → response trả lại scope mới; gọi lại bước 4 thấy danh sách trạm đổi theo.
 
 ### 9.3. Các ca kiểm thử nghiệp vụ (kỳ vọng lỗi)
 
@@ -330,10 +399,81 @@ curl -s -X POST http://localhost:3000/events/1/close \
 | Tọa độ ngoài khoảng | `POST /stations` với `latitude: 200` | `400 Bad Request` |
 | Ngưỡng trùng mức | Gửi 2 threshold cùng `alertLevel` | `400 Bad Request` |
 | Đổi 1 nửa tọa độ | `PUT /stations/:id` chỉ gửi `latitude` (thiếu `longitude`) | `400 Bad Request` |
-| Trùng sự kiện đang chạy | `POST /events` cùng `disasterTypeId` khi đã có 1 sự kiện `ONGOING` | `409 Conflict` |
-| Sai loại thiên tai | `POST /events` với `disasterTypeId` không tồn tại | `400 Bad Request` |
 | Sửa sự kiện đã đóng | `PUT /events/:id` sau khi đã `close` | `403 Forbidden` |
 | Đóng lại sự kiện | `POST /events/:id/close` lần 2 | `409 Conflict` |
+| Gán phạm vi rỗng | `POST /events/:id/impact` với body `{}` (thiếu cả `provinceIds` lẫn `affectedArea`) | `400 Bad Request` |
+| Gán phạm vi tỉnh không tồn tại | `POST /events/:id/impact` với `provinceIds:[999999]` | `400 Bad Request` |
+| Gán phạm vi sự kiện đã đóng | `POST /events/:id/impact` sau khi `close` | `403 Forbidden` |
+| VIEWER gán phạm vi | Login VIEWER rồi `POST /events/:id/impact` | `403 Forbidden` |
+| Sai/thiếu token nội bộ | `POST /internal/events/ingest` thiếu header `X-Internal-Token` | `401 Unauthorized` |
+
+### 9.4. Nhóm C — Import trạm hàng loạt (API 18–19)
+
+Upload **CSV** để tạo nhiều trạm trong một lần qua **async job (BullMQ)** — giống mô hình Nhóm F: API trả `202 { jobId }` ngay, việc nặng (validate từng dòng + insert) chạy nền theo **lô 1.000 dòng/transaction**, rồi **poll** trạng thái. Cần **Redis** đang chạy.
+
+| # | Method | Endpoint | Auth | Mô tả |
+|---|--------|----------|------|-------|
+| 18 | POST | `/stations/import` | OP/ADMIN | Upload CSV (multipart, field `file`) → `202 { jobId }` |
+| 19 | GET | `/stations/import/:jobId` | OP/ADMIN | Trạng thái job + `progress` (0–100) + `report` |
+
+**Định dạng CSV** (UTF-8, phân tách bằng dấu phẩy, có dòng tiêu đề; header không phân biệt hoa/thường):
+
+| Cột | Bắt buộc | Alias chấp nhận | Ràng buộc |
+|-----|----------|-----------------|-----------|
+| `station_code` | ✅ | `code`, `ma_tram` | chữ/số/`-`/`_`, ≤50, **duy nhất** (toàn bảng + trong file) |
+| `name` | ✅ | `ten`, `ten_tram` | ≤255 ký tự |
+| `latitude` | ✅ | `lat`, `vi_do` | 6–24 |
+| `longitude` | ✅ | `lng`, `lon`, `kinh_do` | 102–118 |
+| `elevation` | — | `elev`, `do_cao` | -500–9000 (m) |
+| `threshold_l1` / `_l2` / `_l3` | — | `th1`/`th2`/`th3`, `nguong_1..3` | mực nước ngưỡng (m) cho cấp 1/2/3 |
+
+- **Validate đồng bộ (trả `400` ngay):** thiếu file, file rỗng/chỉ có dòng tiêu đề, thiếu cột bắt buộc, hoặc vượt **10.000** dòng.
+- **Validate bất đồng bộ (trong job):** từng dòng được kiểm (định dạng mã, trùng mã, khoảng tọa độ VN, độ cao, ngưỡng…). **Dòng lỗi bị bỏ qua** và gom vào `report.errors` (cap 500 dòng); **dòng hợp lệ vẫn được nhập**. Mỗi lô 1.000 dòng nằm trong 1 transaction; tỉnh tự gán bằng `ST_Contains` (giống API 14).
+- Job **không retry** (`attempts: 1`) — các lô trước đã commit nên chạy lại sẽ tính nhầm.
+- `report` = `{ total, success, failed, errors: [{ row, stationCode, message }], truncatedErrors }`. `row` là **số dòng trong file** (tính cả dòng tiêu đề là dòng 1).
+- Hiện hỗ trợ **CSV** (chưa có XLSX — tránh phụ thuộc nặng).
+
+```bash
+# Tạo 1 file CSV mẫu: dòng 1 hợp lệ, dòng 2 cố tình sai tọa độ để thấy report bỏ qua
+cat > /tmp/stations.csv <<'CSV'
+station_code,name,latitude,longitude,elevation,threshold_l1,threshold_l2,threshold_l3
+VTS-IMP-001,Trạm Import 1,16.8163,107.1003,8.5,2.0,3.5,5.0
+VTS-IMP-002,Trạm Lỗi,200,107.2,,,,
+CSV
+
+# (18) Upload CSV (multipart) -> 202 { jobId }
+curl -s -X POST http://localhost:3000/stations/import \
+  -H "Authorization: Bearer $TOKEN" \
+  -F "file=@/tmp/stations.csv;type=text/csv"
+# -> {"jobId":"<uuid>"}
+export JOB=<jobId>
+
+# (19) Poll trạng thái + report (lặp tới khi state=completed)
+curl -s http://localhost:3000/stations/import/$JOB \
+  -H "Authorization: Bearer $TOKEN"
+# -> {"jobId":"...","state":"completed","progress":100,
+#     "report":{"total":2,"success":1,"failed":1,
+#               "errors":[{"row":3,"stationCode":"VTS-IMP-002","message":"Vĩ độ không hợp lệ (cần trong khoảng 6–24)."}],
+#               "truncatedErrors":false}}
+```
+
+**Test trên Postman (Nhóm C — Import):**
+
+1. `POST {{baseUrl}}/stations/import`, tab **Body → form-data**: thêm key `file`, đổi kiểu cột từ *Text* sang **File**, chọn file `.csv`. Authorization để **Inherit** (Bearer của OP/ADMIN). **Đừng** tự set `Content-Type` — Postman tự thêm boundary multipart. Send → `202 { jobId }`.
+2. Tab **Scripts → Post-response**: `pm.collectionVariables.set("import_job", pm.response.json().jobId);`
+3. `GET {{baseUrl}}/stations/import/{{import_job}}` → bấm Send lặp lại tới khi `state = completed`, đọc `report` (success/failed + mảng `errors`).
+4. Kiểm tra DB: `SELECT station_code, name, province_id FROM stations WHERE station_code LIKE 'VTS-IMP-%';` — trạm hợp lệ đã được tạo và **tự gán `province_id`** nếu tọa độ nằm trong ranh giới một tỉnh.
+
+**Các ca kiểm thử (kỳ vọng lỗi):**
+
+| Tình huống | Cách tái hiện | Kết quả mong đợi |
+|------------|---------------|------------------|
+| Thiếu file | `POST /stations/import` không kèm form-data `file` | `400 Bad Request` |
+| Thiếu cột bắt buộc | CSV không có cột `latitude` | `400` — *Thiếu cột bắt buộc* |
+| File rỗng | CSV chỉ có dòng tiêu đề | `400 Bad Request` |
+| Vượt giới hạn | CSV > 10.000 dòng | `400 Bad Request` |
+| Sai phân quyền | Login VIEWER rồi `POST /stations/import` | `403 Forbidden` |
+| Job không tồn tại | `GET /stations/import/khong-co` | `404 Not Found` |
 
 ## 10. Test API — Nhóm F (Thời tiết bên thứ 3) bằng Postman
 
@@ -480,7 +620,7 @@ Endpoint là **internal** (giống API 34): **No Auth** (bỏ Bearer) + header `
 
 ## 11. Test Realtime — WebSocket (Socket.IO, API 44–47)
 
-Gateway risk-delta đẩy thay đổi rủi ro của trạm về client theo **phòng (room) tile bản đồ**. Đây là **Socket.IO** (không phải WebSocket thuần), chạy cùng cổng API (`ws://localhost:3000`, path mặc định `/socket.io`). Cần **Redis** đang chạy (adapter Socket.IO + event bus). *(Phía frontend chưa có client — phần này test bằng Postman/script.)*
+Gateway risk-delta đẩy thay đổi rủi ro của trạm về client theo **phòng (room) tile bản đồ**. Đây là **Socket.IO** (không phải WebSocket thuần), chạy cùng cổng API (`ws://localhost:3000`, path mặc định `/socket.io`). Cần **Redis** đang chạy (adapter Socket.IO + event bus). *(Frontend đã có client tại `src/lib/realtime.ts` — `MapView` mở 1 kết nối JWT, `subscribe:viewport` theo khung nhìn, merge `risk:delta` vào trạm đang hiển thị. Các bước dưới giúp test gateway độc lập bằng Postman/script.)*
 
 ### 11.1. Các sự kiện
 

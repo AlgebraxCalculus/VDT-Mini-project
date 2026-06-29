@@ -15,7 +15,7 @@ import type {
   Threshold,
 } from '../types';
 
-const API_BASE = (
+export const API_BASE = (
   (import.meta.env.VITE_API_BASE as string | undefined) ?? 'http://localhost:3000'
 ).replace(/\/$/, '');
 
@@ -379,7 +379,191 @@ export const apiDeleteStation = (id: number) =>
 export const apiSetStationThresholds = (id: number, thresholds: ThresholdInput[]) =>
   request<Threshold[]>(`/stations/${id}/thresholds`, { method: 'PUT', body: { thresholds } });
 
+// ---------------------------------------------------------------------------
+// Group C — bulk import (APIs 18–19). Multipart upload → async BullMQ job.
+// ---------------------------------------------------------------------------
+
+/** One skipped row in the import report (mirrors backend ImportRowError). */
+export interface ImportRowError {
+  row: number;
+  stationCode: string;
+  message: string;
+}
+
+/** Final report from the import job (API 19, when the job completes). */
+export interface ImportReport {
+  total: number;
+  success: number;
+  failed: number;
+  errors: ImportRowError[];
+  truncatedErrors: boolean;
+}
+
+/** Job state + progress + report (mirrors backend StationImportService.getStatus). */
+export interface ImportStatus {
+  jobId: string;
+  state: string; // waiting | active | completed | failed | …
+  progress: number; // 0–100
+  report: ImportReport | null;
+  failedReason: string | null;
+}
+
+/**
+ * API 18 — POST /stations/import (multipart). Sends the raw file under field
+ * `file`; the browser sets the multipart Content-Type/boundary, so we don't go
+ * through `request` (which forces JSON). Mirrors `request`'s one-shot 401 refresh.
+ */
+export async function apiImportStations(file: File): Promise<{ jobId: string }> {
+  const send = async (): Promise<Response> => {
+    const form = new FormData();
+    form.append('file', file);
+    const token = getAccessToken();
+    return fetch(`${API_BASE}/stations/import`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: form,
+    });
+  };
+
+  let res: Response;
+  try {
+    res = await send();
+    if (res.status === 401 && getRefreshToken() && (await tryRefresh())) {
+      res = await send();
+    }
+  } catch {
+    throw new ApiError(0, 'Không kết nối được tới máy chủ. Kiểm tra API đã chạy chưa.');
+  }
+
+  const text = await res.text();
+  const data = text ? safeJson(text) : null;
+  if (!res.ok) {
+    const msg = (data as { message?: string | string[] } | null)?.message;
+    const message = Array.isArray(msg) ? msg.join(', ') : msg ?? res.statusText;
+    throw new ApiError(res.status, message);
+  }
+  return data as { jobId: string };
+}
+
+/** API 19 — GET /stations/import/{jobId}. */
+export const apiGetImportJob = (jobId: string) =>
+  request<ImportStatus>(`/stations/import/${jobId}`);
+
 export const apiListProvinces = () => request<ProvinceRef[]>('/provinces');
+
+// ---------------------------------------------------------------------------
+// Group D — Disaster events. Events are tracked automatically from GDACS (manual
+// create was removed); these read the auto-tracked data and let an operator
+// override scope. Shapes mirror events.service.ts (EventWithScope / EventScope).
+//   • 20 GET  /events                  — paginated events + scope counts
+//   • 25 POST /events/{id}/impact      — (re)assign scope (Operator/Admin)
+//   • 26 GET  /events/{id}/stations    — provinces + paginated stations in scope
+// ---------------------------------------------------------------------------
+
+/** Backend EventStatus — the only two lifecycle states (no draft/monitor). */
+export type EventStatus = 'ONGOING' | 'CLOSED';
+
+export interface ApiDisasterType {
+  id: number;
+  code: string; // STORM / FLOOD …
+  name: string;
+}
+
+/** One row of GET /events (API 20/21) — mirrors EventWithScope. */
+export interface ApiEvent {
+  id: string; // BIGINT as string
+  eventCode: string; // e.g. GDACS-TC1000810
+  disasterTypeId: number;
+  disasterType: ApiDisasterType | null;
+  name: string;
+  status: EventStatus;
+  startTime: string; // ISO
+  endTime: string | null;
+  description: string | null;
+  createdBy: number | null; // null for auto-ingested events
+  provinceCount: number;
+  stationCount: number;
+}
+
+export interface PaginatedEvents {
+  data: ApiEvent[];
+  total: number;
+  page: number;
+  size: number;
+}
+
+export interface ListEventsParams {
+  status?: EventStatus;
+  page?: number;
+  size?: number;
+}
+
+/** API 20 — GET /events. */
+export function apiListEvents(params: ListEventsParams = {}): Promise<PaginatedEvents> {
+  const qs = new URLSearchParams();
+  if (params.status) qs.set('status', params.status);
+  qs.set('page', String(params.page ?? 1));
+  qs.set('size', String(params.size ?? 20));
+  return request<PaginatedEvents>(`/events?${qs.toString()}`);
+}
+
+export interface EventScopeProvince {
+  id: number;
+  code: string;
+  name: string;
+}
+
+/** One station in an event's scope (mirrors EventScope.stations.data). */
+export interface EventScopeStation {
+  id: number;
+  stationCode: string;
+  name: string;
+  latitude: number | null;
+  longitude: number | null;
+  riskStatus: RiskStatus | null;
+  provinceName: string | null;
+}
+
+/** API 26 / 25 payload — the event's provinces + a paginated station list. */
+export interface EventScope {
+  provinces: EventScopeProvince[];
+  stations: {
+    data: EventScopeStation[];
+    total: number;
+    page: number;
+    size: number;
+  };
+}
+
+/** API 26 — GET /events/{id}/stations. */
+export function apiGetEventStations(
+  eventId: string,
+  params: { page?: number; size?: number } = {},
+): Promise<EventScope> {
+  const qs = new URLSearchParams();
+  qs.set('page', String(params.page ?? 1));
+  qs.set('size', String(params.size ?? 20));
+  return request<EventScope>(`/events/${eventId}/stations?${qs.toString()}`);
+}
+
+/** GeoJSON footprint accepted by API 25 (SRID 4326). */
+export interface GeoJsonPolygon {
+  type: 'Polygon' | 'MultiPolygon';
+  coordinates: number[][][] | number[][][][];
+}
+
+/** Body for API 25 — at least one of provinceIds / affectedArea required. */
+export interface AssignImpactPayload {
+  provinceIds?: number[];
+  affectedArea?: GeoJsonPolygon;
+}
+
+/**
+ * API 25 — POST /events/{id}/impact (Operator/Admin). Manually (re)assigns the
+ * event's scope; REPLACES the auto-assigned scope and returns the fresh scope.
+ */
+export const apiAssignImpact = (eventId: string, body: AssignImpactPayload) =>
+  request<EventScope>(`/events/${eventId}/impact`, { method: 'POST', body });
 
 // ---------------------------------------------------------------------------
 // Group F — third-party weather integration.

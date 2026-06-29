@@ -1,6 +1,7 @@
 import type { CSSProperties, ReactNode } from 'react';
 import { useApp } from '../state/AppStateContext';
 import { apiLogout } from '../lib/api';
+import { closeRiskSocket } from '../lib/realtime';
 import { isLocked, ROLE_COLOR, ROLE_USER_NAME } from '../lib/role';
 import type { RouteKey } from '../types';
 
@@ -105,6 +106,7 @@ export default function Sidebar() {
 
   // Revoke tokens server-side, then drop the session and return to login.
   const logout = () => {
+    closeRiskSocket(); // drop the WS connection so the next user re-handshakes
     void apiLogout();
     patch({ route: 'login', currentUser: null });
   };

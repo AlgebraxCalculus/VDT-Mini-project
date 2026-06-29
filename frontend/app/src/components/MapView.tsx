@@ -2,8 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import L from 'leaflet';
 import { useApp } from '../state/AppStateContext';
-import { band, riskMeta, FLOOD_LEGEND, WEATHER_LEGENDS, forecastDayLabel } from '../data/mockData';
+import { band, riskMeta, FLOOD_LEGEND, WEATHER_LEGENDS, forecastDayLabel, EVENTS } from '../data/mockData';
 import { apiListStationsInViewport, apiGetStationForecast, apiGetStationAlertHistory, apiGetProvinceForecast, ApiError } from '../lib/api';
+import { subscribeViewport, unsubscribeViewport, onRiskDelta, onRealtimeStatus, type RealtimeStatus } from '../lib/realtime';
 import type { AlertHistoryEntry, ClassifiedForecastPoint, ForecastPoint, MapLayout, Station, WeatherLayerKey } from '../types';
 
 const WEATHER_FIELDS: Record<WeatherLayerKey, [number, number, string, number][]> = {
@@ -32,6 +33,9 @@ const WEATHER_FIELDS: Record<WeatherLayerKey, [number, number, string, number][]
   ],
 };
 
+// Mock impact footprint. Real geometry will come from event_provinces.affected_area
+// (API 26 GET /events/{id}/stations · API 28 GET /map/events) once wired; for now
+// only the label is data-driven (sourced from the active event in the events list).
 const EVENT_POLY: [number, number][] = [
   [18.4, 105.6],
   [18.2, 107.1],
@@ -42,8 +46,8 @@ const EVENT_POLY: [number, number][] = [
   [17.6, 105.9],
 ];
 
-const SCRUB_LABELS = ['Hôm nay', 'T7 20/6', 'CN 21/6', 'T2 22/6', 'T3 23/6', 'T4 24/6', 'T5 25/6'];
-const SCRUB_SHORT = ['19/6', '20/6', '21/6', '22/6', '23/6', '24/6', '25/6'];
+// Placeholder bar heights for the scrubber before a station's real series loads.
+// The dates are computed live (today → today+6) in `scrubDays`, not hardcoded.
 const SCRUB_HEIGHTS = [26, 30, 38, 34, 28, 22, 18];
 
 // alert_histories.alert_level → colour (1 Chú ý, 2 Cảnh báo, 3 Nguy hiểm).
@@ -106,13 +110,18 @@ export default function MapView() {
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
+  // Real-time risk channel (APIs 44–47). `rtStatus` powers the live pill; deltas
+  // for stations in view are merged into `stations` below.
+  const [rtStatus, setRtStatus] = useState<RealtimeStatus>('connecting');
+
   // Selected-station detail (APIs 38 & 39) — loaded on select, mock-backed for
   // now. setState lives in the .then() callbacks of the effect below (not a
   // synchronous effect body) to respect the project's set-state-in-effect baseline.
   const [selForecast, setSelForecast] = useState<ClassifiedForecastPoint[]>([]);
   const [selHistory, setSelHistory] = useState<AlertHistoryEntry[]>([]);
-  // Province aggregate forecast (API 37) for the selected station's province —
-  // drives the bottom "Mốc dự báo" timeline; empty → the static prototype bars.
+  // Province aggregate forecast (API 37) of the selected station's province —
+  // the single source the scrubber shows (the per-station series feeds only the
+  // panel's 7-day risk bars, not the scrubber).
   const [provForecast, setProvForecast] = useState<ForecastPoint[]>([]);
 
   useEffect(() => {
@@ -141,8 +150,11 @@ export default function MapView() {
     const stationLayer = L.layerGroup().addTo(map);
     stationLayerRef.current = stationLayer;
 
+    // Label the overlay from the active event (ONGOING-equivalent) in the events
+    // list, so it reflects real event data instead of a hardcoded string.
+    const activeEvent = EVENTS.find((e) => e.state === 'active' || e.state === 'monitor');
     const poly = L.polygon(EVENT_POLY, { color: '#EE0033', weight: 2, fillColor: '#EE0033', fillOpacity: 0.08, dashArray: '6 5' }).addTo(eventGroup);
-    poly.bindTooltip('Bão số 3 — WIPHA · Vùng ảnh hưởng', { sticky: true });
+    poly.bindTooltip(`${activeEvent?.name ?? 'Sự kiện thiên tai'} · Vùng ảnh hưởng`, { sticky: true });
 
     // Fetch the stations inside the current map rectangle. Reads bounds fresh on
     // each call (so no stale closure), then re-renders markers via `stations`.
@@ -152,13 +164,16 @@ export default function MapView() {
       const m = mapRef.current;
       if (!m) return;
       const b = m.getBounds();
-      setLoading(true);
-      apiListStationsInViewport({
+      const bbox = {
         minLng: b.getWest(),
         minLat: b.getSouth(),
         maxLng: b.getEast(),
         maxLat: b.getNorth(),
-      })
+      };
+      // Re-join the viewport's tile rooms (API 45) so live deltas track the pan/zoom.
+      subscribeViewport(bbox);
+      setLoading(true);
+      apiListStationsInViewport(bbox)
         .then((data) => {
           setStations(data);
           setLoadError(null);
@@ -186,9 +201,33 @@ export default function MapView() {
     return () => {
       clearTimeout(debounce);
       clearTimeout(initTimer);
+      unsubscribeViewport(); // API 47 — stop deltas when the map unmounts
       viewRef.current = { c: [map.getCenter().lat, map.getCenter().lng], z: map.getZoom() };
       map.remove();
       mapRef.current = null;
+    };
+  }, []);
+
+  // Real-time risk deltas (API 46): merge each delta into the matching station in
+  // view, and track connection status for the live pill. setState runs inside the
+  // socket-event / resolved-promise callbacks (never synchronously in the effect
+  // body), so this respects the project's set-state-in-effect baseline.
+  useEffect(() => {
+    const offDelta = onRiskDelta((d) => {
+      setStations((prev) => {
+        let hit = false;
+        const next = prev.map((s) => {
+          if (s.id !== d.stationId) return s;
+          hit = true;
+          return { ...s, riskStatus: d.riskStatus, severity: d.severity ?? undefined };
+        });
+        return hit ? next : prev; // delta for an off-screen station → no re-render
+      });
+    });
+    const offStatus = onRealtimeStatus(setRtStatus);
+    return () => {
+      offDelta();
+      offStatus();
     };
   }, []);
 
@@ -262,9 +301,15 @@ export default function MapView() {
   useEffect(() => {
     let alive = true;
     if (selectedId == null) {
-      Promise.resolve().then(() => { if (alive) { setSelForecast([]); setSelHistory([]); } });
+      Promise.resolve().then(() => {
+        if (!alive) return;
+        setSelForecast([]);
+        setSelHistory([]);
+      });
       return () => { alive = false; };
     }
+    // Station forecast feeds the panel's 7-day risk bars only; the scrubber's day
+    // count is driven by the province series (effect below).
     apiGetStationForecast(selectedId)
       .then((f) => { if (alive) setSelForecast(f.series); })
       .catch(() => { if (alive) setSelForecast([]); });
@@ -274,9 +319,10 @@ export default function MapView() {
     return () => { alive = false; };
   }, [selectedId]);
 
-  // Province aggregate forecast (API 37) for the scrubber. Keyed by province id,
-  // so it doesn't refire on pan and skips the refetch when the next selected
-  // station shares the same province. Clears (→ mock bars) when nothing is selected.
+  // Province aggregate (API 37) for the selected station's province — the only
+  // series the scrubber shows. Keyed by province id, so it doesn't refire on pan;
+  // it also syncs the play timer to the province series' day count (5–7) and
+  // restarts at today. setState stays in the resolved-promise callbacks.
   const selProvinceId = stations.find((s) => s.id === selectedId)?.provinceId ?? null;
   useEffect(() => {
     let alive = true;
@@ -284,7 +330,7 @@ export default function MapView() {
       Promise.resolve().then(() => {
         if (!alive) return;
         setProvForecast([]);
-        patch({ scrubDayCount: 7 }); // back to the 7-day mock scrubber
+        patch({ scrubDayCount: 7, scrubDay: 0 }); // back to the static placeholder scrubber
       });
       return () => { alive = false; };
     }
@@ -292,8 +338,6 @@ export default function MapView() {
       .then((p) => {
         if (!alive) return;
         setProvForecast(p.series);
-        // Sync the play timer's cycle length to the live day count and restart
-        // the timeline at "today" so it never lands on a non-existent day.
         patch({ scrubDayCount: p.series.length || 7, scrubDay: 0 });
       })
       .catch(() => {
@@ -330,21 +374,29 @@ export default function MapView() {
 
   const sel = stations.find((s) => s.id === selectedId);
   const selMeta = sel ? riskMeta(sel.riskStatus) : null;
-  // Today's forecast point backs the stat tiles: there is no "current weather"
-  // endpoint in the 47-API spec, so the nearest forecast day is the closest
-  // backend-true source for temp / rain / wind / river level.
-  const today = selForecast[0] ?? null;
 
-  // Scrubber timeline: the real province aggregate (API 37) when a station is
-  // selected, else the static prototype bars. Bar height ∝ that day's rainfall.
-  const scrubLive = provForecast.length > 0;
+  // Scrubber source: the selected station's province aggregate (API 37). Falls
+  // back to the static prototype bars when nothing live. Bar height ∝ rainfall.
+  const activeSeries: ForecastPoint[] = provForecast;
+  const scrubLive = activeSeries.length > 0;
   const scrubDays = scrubLive
-    ? provForecast.map((p) => ({ short: dayMonth(p.date), full: `${forecastDayLabel(p.date)} ${dayMonth(p.date)}`, height: rainBarHeight(p.rainfall) }))
-    : SCRUB_HEIGHTS.map((h, i) => ({ short: SCRUB_SHORT[i], full: SCRUB_LABELS[i], height: h }));
+    ? activeSeries.map((p) => ({ short: dayMonth(p.date), full: `${forecastDayLabel(p.date)} ${dayMonth(p.date)}`, height: rainBarHeight(p.rainfall) }))
+    : SCRUB_HEIGHTS.map((h, i) => {
+        // Placeholder days track the real window today → today+6 (dates only, no data
+        // yet). Build the ISO from local parts to avoid a UTC day-shift in VN (UTC+7).
+        const d = new Date();
+        d.setDate(d.getDate() + i);
+        const pad = (n: number) => String(n).padStart(2, '0');
+        const iso = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+        return { short: dayMonth(iso), full: `${forecastDayLabel(iso)} ${dayMonth(iso)}`, height: h };
+      });
   const dayCount = scrubDays.length;
   const activeDay = Math.min(scrubDay, dayCount - 1);
-  // Full forecast readout for the day under the scrubber cursor (live only).
-  const activePoint = scrubLive ? provForecast[activeDay] ?? null : null;
+  // Full readout for the day under the scrubber cursor (live only).
+  const activePoint = scrubLive ? activeSeries[activeDay] ?? null : null;
+  // Panel stat tiles follow the scrubber day + the active source.
+  const dayPoint = activePoint ?? activeSeries[0] ?? null;
+  const dayLabel = scrubLive ? scrubDays[activeDay]?.full ?? 'hôm nay' : 'hôm nay';
   const fieldChips = [
     { label: 'Nhiệt độ', color: '#F97316', value: activePoint?.temperature != null ? `${activePoint.temperature}°C` : '—' },
     { label: 'Mưa', color: '#2563EB', value: activePoint?.rainfall != null ? `${activePoint.rainfall} mm` : '—' },
@@ -397,6 +449,13 @@ export default function MapView() {
         <div style={{ position: 'absolute', bottom: 130, left: '50%', transform: 'translateX(-50%)', zIndex: 550, display: 'flex', alignItems: 'center', gap: 8, background: '#fff', borderRadius: 999, boxShadow: '0 4px 14px rgba(16,20,30,.16)', padding: '8px 16px', fontSize: 12.5, fontWeight: 600, color: loadError ? '#B4123A' : '#5B626B', border: loadError ? '1px solid #F7C6D2' : '1px solid #E8EAEE' }}>
           {!loadError && <span style={{ width: 14, height: 14, borderRadius: '50%', border: '2px solid #FEE2E2', borderTopColor: '#EE0033', animation: 'fwsSpin 1s linear infinite' }} />}
           {loadError ?? 'Đang tải danh sách trạm…'}
+        </div>
+      )}
+
+      {!loading && !loadError && (
+        <div style={{ position: 'absolute', bottom: 130, left: '50%', transform: 'translateX(-50%)', zIndex: 550, display: 'flex', alignItems: 'center', gap: 7, background: '#fff', borderRadius: 999, boxShadow: '0 4px 14px rgba(16,20,30,.16)', padding: '6px 13px', fontSize: 12, fontWeight: 600, border: '1px solid #E8EAEE', color: rtStatus === 'connected' ? '#16794A' : '#9AA0A6' }}>
+          <span style={{ width: 8, height: 8, borderRadius: '50%', flex: 'none', background: rtStatus === 'connected' ? '#16A34A' : '#CBD2DA', boxShadow: rtStatus === 'connected' ? '0 0 0 3px rgba(22,163,74,.18)' : 'none' }} />
+          {rtStatus === 'connected' ? 'Trực tiếp · cập nhật rủi ro real-time' : rtStatus === 'connecting' ? 'Đang kết nối real-time…' : 'Mất kết nối real-time'}
         </div>
       )}
 
@@ -503,33 +562,38 @@ export default function MapView() {
             </div>
           </div>
           <div style={{ overflowY: 'auto', padding: 16 }}>
-            <div style={{ fontSize: 11, fontWeight: 700, color: '#6B7280', letterSpacing: 0.4, textTransform: 'uppercase', marginBottom: 9 }}>Dự báo hôm nay</div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: '#6B7280', letterSpacing: 0.4, textTransform: 'uppercase', marginBottom: 9 }}>Dự báo · {dayLabel}</div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 9 }}>
               <div style={{ background: '#FAFAFB', border: '1px solid #EEF0F3', borderRadius: 11, padding: '11px 12px' }}>
                 <div style={{ fontSize: 11, color: '#9AA0A6', fontWeight: 600 }}>Nhiệt độ</div>
-                <div style={{ fontSize: 20, fontWeight: 800, fontFamily: "'IBM Plex Mono',monospace", marginTop: 2 }}>{today?.temperature ?? '—'}°</div>
+                <div style={{ fontSize: 20, fontWeight: 800, fontFamily: "'IBM Plex Mono',monospace", marginTop: 2 }}>{dayPoint?.temperature ?? '—'}°</div>
               </div>
               <div style={{ background: '#FAFAFB', border: '1px solid #EEF0F3', borderRadius: 11, padding: '11px 12px' }}>
                 <div style={{ fontSize: 11, color: '#9AA0A6', fontWeight: 600 }}>Mưa dự báo (ngày)</div>
-                <div style={{ fontSize: 20, fontWeight: 800, fontFamily: "'IBM Plex Mono',monospace", marginTop: 2 }}>{today?.rainfall ?? '—'}<span style={{ fontSize: 12, fontWeight: 500, color: '#9AA0A6' }}> mm</span></div>
+                <div style={{ fontSize: 20, fontWeight: 800, fontFamily: "'IBM Plex Mono',monospace", marginTop: 2 }}>{dayPoint?.rainfall ?? '—'}<span style={{ fontSize: 12, fontWeight: 500, color: '#9AA0A6' }}> mm</span></div>
               </div>
               <div style={{ background: '#FAFAFB', border: '1px solid #EEF0F3', borderRadius: 11, padding: '11px 12px' }}>
                 <div style={{ fontSize: 11, color: '#9AA0A6', fontWeight: 600 }}>Gió</div>
-                <div style={{ fontSize: 20, fontWeight: 800, fontFamily: "'IBM Plex Mono',monospace", marginTop: 2 }}>{today?.windSpeed ?? '—'}<span style={{ fontSize: 12, fontWeight: 500, color: '#9AA0A6' }}> m/s</span></div>
+                <div style={{ fontSize: 20, fontWeight: 800, fontFamily: "'IBM Plex Mono',monospace", marginTop: 2 }}>{dayPoint?.windSpeed ?? '—'}<span style={{ fontSize: 12, fontWeight: 500, color: '#9AA0A6' }}> m/s</span></div>
               </div>
               <div style={{ background: '#FAFAFB', border: '1px solid #EEF0F3', borderRadius: 11, padding: '11px 12px' }}>
                 <div style={{ fontSize: 11, color: '#9AA0A6', fontWeight: 600 }}>Mực nước sông</div>
-                <div style={{ fontSize: 20, fontWeight: 800, fontFamily: "'IBM Plex Mono',monospace", marginTop: 2 }}>{today?.riverWaterLevel ?? '—'}<span style={{ fontSize: 12, fontWeight: 500, color: '#9AA0A6' }}> m</span></div>
+                <div style={{ fontSize: 20, fontWeight: 800, fontFamily: "'IBM Plex Mono',monospace", marginTop: 2 }}>{dayPoint?.riverWaterLevel ?? '—'}<span style={{ fontSize: 12, fontWeight: 500, color: '#9AA0A6' }}> m</span></div>
               </div>
             </div>
 
             <div style={{ fontSize: 12, fontWeight: 700, color: '#6B7280', letterSpacing: 0.4, textTransform: 'uppercase', margin: '18px 0 9px' }}>Dự báo chỉ số ngập 7 ngày</div>
             <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 78 }}>
-              {selForecast.map((f) => (
-                <div key={f.date} style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5 }}>
-                  <div title={`Chỉ số ${f.riskScore}`} style={{ width: '100%', borderRadius: '5px 5px 2px 2px', background: band(f.riskScore)[1], height: 8 + f.riskScore * 0.7, minHeight: 5 }} />
-                  <div style={{ fontSize: 9.5, color: '#9AA0A6', fontFamily: "'IBM Plex Mono',monospace" }}>{forecastDayLabel(f.date)}</div>
-                </div>
+              {selForecast.map((f, i) => (
+                <button
+                  key={f.date}
+                  onClick={() => patch({ scrubDay: i })}
+                  title={`${forecastDayLabel(f.date)} · Chỉ số ${f.riskScore}`}
+                  style={{ flex: 1, display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 5, border: 'none', background: 'transparent', padding: 0, cursor: 'pointer' }}
+                >
+                  <div style={{ width: '100%', borderRadius: '5px 5px 2px 2px', background: band(f.riskScore)[1], height: 8 + f.riskScore * 0.7, minHeight: 5, opacity: i === activeDay ? 1 : 0.5, outline: i === activeDay ? '2px solid #EE0033' : 'none', outlineOffset: 1 }} />
+                  <div style={{ fontSize: 9.5, color: i === activeDay ? '#EE0033' : '#9AA0A6', fontWeight: i === activeDay ? 700 : 500, fontFamily: "'IBM Plex Mono',monospace" }}>{forecastDayLabel(f.date)}</div>
+                </button>
               ))}
             </div>
 
@@ -599,7 +663,7 @@ export default function MapView() {
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M8 5v14M15 12L8 5v14l7-7Z" fill="currentColor" /></svg>
           </button>
         </div>
-        <div style={{ flex: 'none', minWidth: 168 }}>
+        <div style={{ flex: 'none', minWidth: 196 }}>
           <div style={{ fontSize: 11, color: '#9AA0A6', fontWeight: 600, display: 'flex', alignItems: 'center', gap: 6 }}>
             Mốc dự báo
             {scrubLive && (
@@ -609,12 +673,14 @@ export default function MapView() {
               </span>
             )}
           </div>
-          <div style={{ fontSize: 14.5, fontWeight: 700, fontFamily: "'IBM Plex Mono',monospace" }}>{scrubDays[activeDay]?.full ?? '—'}</div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 1 }}>
+            <div style={{ fontSize: 14.5, fontWeight: 700, fontFamily: "'IBM Plex Mono',monospace" }}>{scrubDays[activeDay]?.full ?? '—'}</div>
+          </div>
         </div>
         <div style={{ flex: 1, display: 'flex', gap: 4, alignItems: 'flex-end', height: 40 }}>
           {scrubDays.map((d, i) => {
             const on = i === activeDay;
-            const p = scrubLive ? provForecast[i] : null;
+            const p = scrubLive ? activeSeries[i] : null;
             const tip = p
               ? `${d.full} · Nhiệt độ ${p.temperature ?? '—'}°C · Mưa ${p.rainfall ?? '—'}mm · Gió ${p.windSpeed ?? '—'}m/s${p.windDirection != null ? ` ${windDir(p.windDirection)}` : ''} · Mực nước ${p.riverWaterLevel ?? '—'}m`
               : d.full;

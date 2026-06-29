@@ -1,0 +1,287 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { Cron } from '@nestjs/schedule';
+import { DataSource, EntityManager } from 'typeorm';
+import { EventBusService } from '../../../event-bus/event-bus.service';
+import { EVENT_CHANNELS } from '../../../event-bus/event-bus.constants';
+import { GdacsProvider } from '../../weather/providers/gdacs.provider';
+import {
+  AffectedGeom,
+  DEFAULT_RADIUS_CONFIG,
+  NormalizedDisaster,
+  parseGdacsEvents,
+  RadiusConfig,
+} from './gdacs.parser';
+
+/** Per-event outcome of one upsert pass. */
+type UpsertResult =
+  | { skipped: true }
+  | { skipped: false; eventId: string; isNew: boolean; addedStationIds: number[] };
+
+export interface IngestSummary {
+  created: number;
+  updated: number;
+  scopedStations: number;
+  closed: number;
+}
+
+/**
+ * Group D — automatic disaster-event tracking. Replaces the removed manual create
+ * (API 22): nobody declares events by hand. A cron pulls the GDACS feed (the
+ * primary disaster source; ReliefWeb/EONET fallback is a later step), keeps only
+ * VN-relevant STORM/FLOOD hazards, and for each one:
+ *
+ *   1. upserts `disaster_events` keyed by a GDACS-derived `event_code` (dedupe);
+ *   2. freezes scope into the N-N tables (`event_provinces` with a clipped impact
+ *      polygon, `event_stations` for stations inside the footprint) via raw PostGIS;
+ *   3. publishes EVENT_SCOPE_ASSIGNED so the Risk Engine recomputes the new stations.
+ *
+ * Events that drop out of the feed are transitioned ONGOING → CLOSED and emit
+ * EVENT_CLOSED. All bus publishes are fire-and-forget after the DB commit.
+ *
+ * VN-relevance is decided spatially: an event is kept only if its footprint
+ * intersects at least one province in our DB — which doubles as the scope query.
+ */
+@Injectable()
+export class EventIngestionService {
+  private readonly logger = new Logger(EventIngestionService.name);
+  private readonly radii: RadiusConfig;
+
+  constructor(
+    private readonly gdacs: GdacsProvider,
+    private readonly dataSource: DataSource,
+    private readonly eventBus: EventBusService,
+    private readonly config: ConfigService,
+  ) {
+    this.radii = this.loadRadii();
+  }
+
+  @Cron(process.env.DISASTER_CRON ?? '20 * * * *', { name: 'disaster-ingest' })
+  async scheduledRun(): Promise<void> {
+    try {
+      await this.run();
+    } catch (err) {
+      this.logger.error(`disaster ingest failed: ${(err as Error).message}`);
+    }
+  }
+
+  /** Pull → normalize → upsert + scope → close stale. Returns a summary. */
+  async run(): Promise<IngestSummary> {
+    const summary: IngestSummary = { created: 0, updated: 0, scopedStations: 0, closed: 0 };
+
+    let raw: unknown;
+    try {
+      raw = await this.gdacs.fetchEvents();
+    } catch (err) {
+      // A fetch failure must not trigger the close-sweep (would wrongly close
+      // every ongoing event), so bail out before it.
+      this.logger.warn(`GDACS fetch failed, skipping run: ${(err as Error).message}`);
+      return summary;
+    }
+
+    const events = parseGdacsEvents(raw, this.radii);
+    this.logger.log(`GDACS: ${events.length} STORM/FLOOD hazard(s) in feed`);
+
+    const seen = new Set<string>();
+    for (const ev of events) {
+      const res = await this.upsertEvent(ev);
+      if (res.skipped) continue; // not VN-relevant
+      seen.add(ev.eventCode);
+      if (res.isNew) summary.created++;
+      else summary.updated++;
+
+      if (res.addedStationIds.length > 0) {
+        summary.scopedStations += res.addedStationIds.length;
+        this.publishScope(res.eventId, res.addedStationIds);
+      }
+    }
+
+    summary.closed = await this.closeStale(seen);
+
+    this.logger.log(
+      `disaster ingest done: +${summary.created} new, ${summary.updated} updated, ` +
+        `${summary.scopedStations} stations scoped, ${summary.closed} closed`,
+    );
+    return summary;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Per-event upsert + scope (one transaction)
+  // ---------------------------------------------------------------------------
+
+  private async upsertEvent(ev: NormalizedDisaster): Promise<UpsertResult> {
+    const { sql: geomSql, params: geomParams } = affectedSql(ev.geom);
+    // event_id placeholder index sits right after the geometry params.
+    const eIdx = geomParams.length + 1;
+
+    return this.dataSource.transaction(async (m: EntityManager) => {
+      // VN-relevance gate (also the scope predicate): does the footprint touch
+      // any province we know about?
+      const hit = await m.query(
+        `WITH a AS (SELECT ${geomSql} AS geom)
+         SELECT 1 FROM provinces p, a WHERE ST_Intersects(p.boundary, a.geom) LIMIT 1`,
+        geomParams,
+      );
+      if (hit.length === 0) return { skipped: true as const };
+
+      const typeId = await this.ensureType(m, ev.typeCode, ev.typeName);
+      const description = ev.alertLevel
+        ? `Tự động từ GDACS · mức cảnh báo ${ev.alertLevel}`
+        : 'Tự động từ GDACS';
+
+      const upserted = await m.query<
+        { id: string; status: string; is_new: boolean }[]
+      >(
+        `INSERT INTO disaster_events
+           (event_code, disaster_type_id, name, status, start_time, description, created_by)
+         VALUES ($1, $2, $3, 'ONGOING', $4, $5, NULL)
+         ON CONFLICT (event_code)
+           DO UPDATE SET name = EXCLUDED.name, updated_at = now()
+         RETURNING id, status, (xmax = 0) AS is_new`,
+        [ev.eventCode, typeId, ev.name, ev.startTime, description],
+      );
+      const row = upserted[0];
+      const eventId = String(row.id);
+
+      // A reappearing CLOSED event is not re-opened or re-scoped.
+      if (row.status === 'CLOSED') {
+        return { skipped: false as const, eventId, isNew: false, addedStationIds: [] };
+      }
+
+      const scopeParams = [...geomParams, eventId];
+
+      // Affected provinces — store the clipped footprint's bounding polygon
+      // (ST_Envelope guarantees a single Polygon for the Polygon-typed column;
+      // area>0 drops mere edge-touches).
+      await m.query(
+        `WITH a AS (SELECT ${geomSql} AS geom)
+         INSERT INTO event_provinces (event_id, province_id, affected_area)
+         SELECT $${eIdx}, p.id, ST_Envelope(ST_Intersection(p.boundary, a.geom))
+         FROM provinces p, a
+         WHERE ST_Intersects(p.boundary, a.geom)
+           AND ST_Area(ST_Intersection(p.boundary, a.geom)) > 0
+         ON CONFLICT (event_id, province_id)
+           DO UPDATE SET affected_area = EXCLUDED.affected_area`,
+        scopeParams,
+      );
+
+      // Affected stations — only newly-added ids are returned (scope grows
+      // incrementally as the hazard moves; existing links are kept).
+      const added = await m.query<{ station_id: number }[]>(
+        `WITH a AS (SELECT ${geomSql} AS geom)
+         INSERT INTO event_stations (event_id, station_id)
+         SELECT $${eIdx}, s.id
+         FROM stations s, a
+         WHERE s.is_deleted = false AND ST_Intersects(a.geom, s.geom)
+         ON CONFLICT (event_id, station_id) DO NOTHING
+         RETURNING station_id`,
+        scopeParams,
+      );
+
+      return {
+        skipped: false as const,
+        eventId,
+        isNew: row.is_new === true,
+        addedStationIds: added.map((r) => Number(r.station_id)),
+      };
+    });
+  }
+
+  /** Resolve (create if missing) a disaster_type id by code. */
+  private async ensureType(
+    m: EntityManager,
+    code: string,
+    name: string,
+  ): Promise<number> {
+    const rows = await m.query<{ id: number }[]>(
+      `INSERT INTO disaster_types (code, name) VALUES ($1, $2)
+       ON CONFLICT (code) DO UPDATE SET name = disaster_types.name
+       RETURNING id`,
+      [code, name],
+    );
+    return rows[0].id;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Lifecycle: close events that left the feed
+  // ---------------------------------------------------------------------------
+
+  /** Close ONGOING GDACS events absent from this run's feed. Skipped if nothing was seen (avoids closing on an empty/misconfigured feed). */
+  private async closeStale(seen: Set<string>): Promise<number> {
+    if (seen.size === 0) {
+      this.logger.debug('closeStale: no VN-relevant events this run — skipping sweep');
+      return 0;
+    }
+    const rows = await this.dataSource.query<{ id: string }[]>(
+      `UPDATE disaster_events
+          SET status = 'CLOSED', end_time = now(), updated_at = now()
+        WHERE event_code LIKE 'GDACS-%'
+          AND status = 'ONGOING'
+          AND event_code <> ALL($1)
+        RETURNING id`,
+      [[...seen]],
+    );
+    for (const r of rows) this.publishClosed(String(r.id));
+    return rows.length;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Bus publishes (fire-and-forget, post-commit)
+  // ---------------------------------------------------------------------------
+
+  private publishScope(eventId: string, stationIds: number[]): void {
+    void this.eventBus
+      .publish(EVENT_CHANNELS.EVENT_SCOPE_ASSIGNED, { eventId, stationIds })
+      .catch((err) =>
+        this.logger.error(
+          `publish scope-assigned failed for event=${eventId}: ${(err as Error).message}`,
+        ),
+      );
+  }
+
+  private publishClosed(eventId: string): void {
+    void this.eventBus
+      .publish(EVENT_CHANNELS.EVENT_CLOSED, { eventId })
+      .catch((err) =>
+        this.logger.error(
+          `publish event-closed failed for event=${eventId}: ${(err as Error).message}`,
+        ),
+      );
+  }
+
+  private loadRadii(): RadiusConfig {
+    const num = (key: string, fallback: number): number => {
+      const v = parseFloat(this.config.get<string>(key) ?? '');
+      return Number.isFinite(v) && v > 0 ? v : fallback;
+    };
+    return {
+      storm: num('DISASTER_STORM_RADIUS_DEG', DEFAULT_RADIUS_CONFIG.storm),
+      flood: num('DISASTER_FLOOD_RADIUS_DEG', DEFAULT_RADIUS_CONFIG.flood),
+      alertMultiplier: DEFAULT_RADIUS_CONFIG.alertMultiplier,
+    };
+  }
+}
+
+/**
+ * Build the PostGIS expression for an event's footprint, using $1..$n. Callers
+ * append the event_id as $(n+1). Kept outside the class so it's trivially testable.
+ */
+function affectedSql(geom: AffectedGeom): { sql: string; params: unknown[] } {
+  switch (geom.kind) {
+    case 'point':
+      return {
+        sql: 'ST_Buffer(ST_SetSRID(ST_MakePoint($1, $2), 4326), $3)',
+        params: [geom.lon, geom.lat, geom.radiusDeg],
+      };
+    case 'bbox':
+      return {
+        sql: 'ST_MakeEnvelope($1, $2, $3, $4, 4326)',
+        params: [geom.minX, geom.minY, geom.maxX, geom.maxY],
+      };
+    case 'geojson':
+      return {
+        sql: 'ST_SetSRID(ST_GeomFromGeoJSON($1), 4326)',
+        params: [geom.geojson],
+      };
+  }
+}

@@ -121,5 +121,8 @@ import { GlofasService } from './glofas.service';
       ],
     },
   ],
+  // GdacsProvider is reused by the events module's disaster-ingestion pipeline
+  // (Group D), so it must be exported.
+  exports: [GdacsProvider],
 })
 export class WeatherModule {}

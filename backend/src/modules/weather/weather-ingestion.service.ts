@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
-import { DataSource, In, Repository } from 'typeorm';
+import { DataSource, EntityManager, In, Repository } from 'typeorm';
 import { EventBusService } from '../../event-bus/event-bus.service';
 import { EVENT_CHANNELS } from '../../event-bus/event-bus.constants';
 import { Station } from '../stations/entities/station.entity';
@@ -134,6 +134,8 @@ export class WeatherIngestionService {
         for (let i = 0; i < rows.length; i += FORECAST_CHUNK) {
           await manager.insert(WeatherForecast, rows.slice(i, i + FORECAST_CHUNK));
         }
+        // Keep river data alive between daily GloFAS runs (see carryForwardRiver).
+        await this.carryForwardRiver(manager, snapshot.id);
         await manager.update(WeatherSnapshot, snapshot.id, {
           sourceCode: source,
           status: 'SUCCESS',
@@ -241,6 +243,57 @@ export class WeatherIngestionService {
   // ---------------------------------------------------------------------------
   // Helpers
   // ---------------------------------------------------------------------------
+
+  /**
+   * Carry the most recent river_water_level into this fresh forecast snapshot.
+   *
+   * GloFAS runs once/day and only enriches whatever snapshot was latest at its run
+   * time; every hourly forecast ingest in between creates a snapshot whose river
+   * column is NULL (forecast providers don't supply river). Left as-is that would
+   * collapse the Risk Engine's V index — and thus severity — back to LOW until the
+   * next GloFAS run. To avoid that *without a schema change*, copy the river stage
+   * from the most recent prior forecast snapshot that has river data, matched per
+   * station + calendar day. Runs inside the ingest transaction so the snapshot is
+   * never published river-less when carry-forward data exists; the next GloFAS run
+   * overwrites these carried values with fresh discharge-derived stages.
+   *
+   * No-op (cheap single-row probe) when no prior river data exists yet. Province
+   * rows (station_id NULL) are not carried — GloFAS only enriches station rows.
+   */
+  private async carryForwardRiver(
+    manager: EntityManager,
+    snapshotId: string,
+  ): Promise<void> {
+    // Most recent prior forecast snapshot that actually holds river data.
+    const src = await manager.query<{ snapshot_id: string }[]>(
+      `SELECT prev.snapshot_id
+         FROM weather_forecasts prev
+         JOIN weather_snapshots ws ON ws.id = prev.snapshot_id
+        WHERE prev.river_water_level IS NOT NULL
+          AND ws.id < $1
+          AND ws.source_code NOT IN ('GDACS','EONET','ReliefWeb','GloFAS')
+        ORDER BY ws.id DESC
+        LIMIT 1`,
+      [snapshotId],
+    );
+    const sourceId = src[0]?.snapshot_id;
+    if (!sourceId) return; // no prior river data yet — nothing to carry
+
+    await manager.query(
+      `UPDATE weather_forecasts cur
+          SET river_water_level = prev.river_water_level
+         FROM weather_forecasts prev
+        WHERE prev.snapshot_id = $1
+          AND cur.snapshot_id = $2
+          AND cur.station_id = prev.station_id
+          AND (cur.forecast_time)::date = (prev.forecast_time)::date
+          AND cur.river_water_level IS NULL`,
+      [sourceId, snapshotId],
+    );
+    this.logger.log(
+      `Snapshot ${snapshotId}: carried river_water_level forward from snapshot ${sourceId}`,
+    );
+  }
 
   private async resolveTargets(opts: IngestOptions): Promise<ForecastTarget[]> {
     const targets: ForecastTarget[] = [];

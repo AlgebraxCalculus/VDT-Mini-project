@@ -10,8 +10,13 @@ import {
   Post,
   Put,
   Query,
+  UploadedFile,
+  UseInterceptors,
 } from '@nestjs/common';
+import { FileInterceptor } from '@nestjs/platform-express';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { CurrentUser } from '../auth/decorators/current-user.decorator';
+import { AuthenticatedUser } from '../auth/types/jwt-payload.interface';
 import { RoleCode } from '../users/entities/role.entity';
 import { CreateStationDto } from './dto/create-station.dto';
 import { QueryStationsDto } from './dto/query-stations.dto';
@@ -19,6 +24,11 @@ import { SetThresholdsDto } from './dto/set-thresholds.dto';
 import { UpdateStationDto } from './dto/update-station.dto';
 import { ViewportStationsDto } from './dto/viewport-stations.dto';
 import { StationsService } from './stations.service';
+import { IMPORT_MAX_BYTES } from './import/station-import.constants';
+import {
+  StationImportService,
+  UploadedCsvFile,
+} from './import/station-import.service';
 
 /**
  * Group C — Station management. Reads are open to any authenticated user
@@ -27,7 +37,34 @@ import { StationsService } from './stations.service';
  */
 @Controller('stations')
 export class StationsController {
-  constructor(private readonly stationsService: StationsService) {}
+  constructor(
+    private readonly stationsService: StationsService,
+    private readonly importService: StationImportService,
+  ) {}
+
+  /**
+   * API 18 — POST /stations/import. Multipart CSV upload → 202 { jobId }. The
+   * file is shape-validated synchronously (400 on a malformed file); per-row
+   * validation + batched insert run async in StationImportProcessor.
+   * Declared before `:id` routes so the literal path isn't mis-parsed.
+   */
+  @Roles(RoleCode.OPERATOR, RoleCode.ADMIN)
+  @Post('import')
+  @HttpCode(HttpStatus.ACCEPTED)
+  @UseInterceptors(FileInterceptor('file', { limits: { fileSize: IMPORT_MAX_BYTES } }))
+  import(
+    @UploadedFile() file: UploadedCsvFile | undefined,
+    @CurrentUser() user: AuthenticatedUser,
+  ) {
+    return this.importService.enqueueImport(file, user.id);
+  }
+
+  /** API 19 — GET /stations/import/{jobId} (job state + progress + report). */
+  @Roles(RoleCode.OPERATOR, RoleCode.ADMIN)
+  @Get('import/:jobId')
+  getImportStatus(@Param('jobId') jobId: string) {
+    return this.importService.getStatus(jobId);
+  }
 
   /** API 12 — GET /stations. */
   @Get()
