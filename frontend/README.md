@@ -3,7 +3,7 @@
 Giao diện web cho hệ thống **Cảnh báo lũ (Flood Warning System)** của VTNet: giám sát thời tiết thời gian thực, dự báo nguy cơ ngập theo trạm, quản lý nhà trạm / sự kiện thiên tai và phân quyền người dùng.
 
 > **Trạng thái tích hợp (đang chuyển từ prototype → kết nối backend thật):**
-> Các màn hình đã **gọi API NestJS thật** qua [`app/src/lib/api.ts`](app/src/lib/api.ts) — **Login, Accounts, Stations, Map, Health, Forecast, Events, Import** và chip nguồn/đồng bộ trên **Topbar**. Riêng **Map** nay đã merge sâu hơn: panel chi tiết trạm (dự báo 7 ngày + lịch sử cảnh báo, **API 38/39**), thanh "Mốc dự báo" cấp tỉnh (**API 37**) đều là dữ liệu thật, và **realtime WebSocket (API 44–47)** đã nối qua [`app/src/lib/realtime.ts`](app/src/lib/realtime.ts) — đẩy `risk:delta` vào trạm đang hiển thị + chip "Trực tiếp". **Events** (**Nhóm D**): danh sách (**API 20**) + drawer phạm vi (**API 26**) + gán/khoanh vùng thủ công (**API 25**) — sự kiện **tự động tracking** từ chuỗi thiên tai (GDACS→ReliefWeb→EONET), **không còn form tạo tay**. **Import** (**Nhóm C, API 18–19**): chọn CSV → tiền kiểm định dạng phía client → upload async (BullMQ) → poll tiến độ + báo cáo. Các phần **còn mock**: lớp thời tiết/lũ overlay của Map và panel "Cảnh báo nguy cơ" (phụ thuộc `riskScore`/`weather` mà `GET /stations/viewport` chưa trả) — xem [`app/src/data/mockData.ts`](app/src/data/mockData.ts). Xem bảng chi tiết ở **mục 4 — API đã tích hợp** và lịch sử thay đổi ở **mục 7**.
+> Các màn hình đã **gọi API NestJS thật** qua [`app/src/lib/api.ts`](app/src/lib/api.ts) — **Login, Accounts, Stations, Map, Health, Forecast, Events, Import** và chip nguồn/đồng bộ trên **Topbar**. Riêng **Map** nay đã merge sâu hơn: panel chi tiết trạm (dự báo 7 ngày + lịch sử cảnh báo, **API 38/39**), thanh "Mốc dự báo" cấp tỉnh (**API 37**) đều là dữ liệu thật, và **realtime WebSocket (API 44–47)** đã nối qua [`app/src/lib/realtime.ts`](app/src/lib/realtime.ts) — đẩy `risk:delta` vào trạm đang hiển thị + chip "Trực tiếp". **Events** (**Nhóm D**): danh sách (**API 20**) + drawer phạm vi (**API 26**) + gán/khoanh vùng thủ công (**API 25**) — sự kiện **tự động tracking** từ chuỗi thiên tai (GDACS→ReliefWeb→EONET), **không còn form tạo tay**. **Import** (**Nhóm C, API 18–19**): chọn CSV → tiền kiểm định dạng phía client → upload async (BullMQ) → poll tiến độ + báo cáo. **Stations** (**Nhóm H, API 40–43**): nút "Xuất báo cáo" → tạo báo cáo danh sách trạm theo bộ lọc đang xem → poll → tải **CSV** hoặc mở **HTML in được (PDF)**. Các phần **còn mock**: lớp thời tiết/lũ overlay của Map và panel "Cảnh báo nguy cơ" (phụ thuộc `riskScore`/`weather` mà `GET /stations/viewport` chưa trả) — xem [`app/src/data/mockData.ts`](app/src/data/mockData.ts). Xem bảng chi tiết ở **mục 4 — API đã tích hợp** và lịch sử thay đổi ở **mục 7**.
 
 ---
 
@@ -53,7 +53,7 @@ frontend/
             ├── Toast.tsx        # Thông báo nổi
             ├── MapView.tsx      # Bản đồ Leaflet: trạm (GET /stations/viewport) + panel chi tiết (API 38/39) + scrubber tỉnh (API 37) + realtime risk:delta (API 44–47); lớp thời tiết/lũ overlay vẫn mock
             ├── ForecastView.tsx # Bảng dự báo nguy cơ ngập 5–7 ngày (GET /risk/stations — API 36; mock làm fallback)
-            ├── StationsView.tsx # CRUD nhà trạm (GET/POST/PUT/DELETE /stations + thresholds + provinces)
+            ├── StationsView.tsx # CRUD nhà trạm (GET/POST/PUT/DELETE /stations + thresholds + provinces) + Xuất báo cáo (API 40–43): tạo → poll → tải CSV / in HTML (PDF)
             ├── ImportView.tsx   # Nhập trạm hàng loạt thật (API 18/19): CSV → tiền kiểm client → upload async → poll báo cáo
             ├── EventsView.tsx   # Sự kiện thiên tai (GET /events — API 20) + drawer phạm vi (API 26) + gán scope (API 25); auto-tracking, không có form tạo
             ├── AccountsView.tsx # Tài khoản & phân quyền (Group B — /users, /roles)
@@ -104,6 +104,8 @@ frontend/
 |---|---|---|---|
 | **Login.tsx** | API 1 — Đăng nhập | `POST /auth/login` | `apiLogin` |
 | **Sidebar.tsx** | API 3 — Đăng xuất | `POST /auth/logout` | `apiLogout` |
+| | API 36 — Badge "Dự báo": số trạm nguy cơ hôm nay | `GET /risk/stations?from=to=hôm nay` | `apiListRiskStations` |
+| | API 20 — Badge "Sự kiện": số sự kiện đang hoạt động | `GET /events?status=ONGOING` | `apiListEvents` |
 | **AccountsView.tsx** | API 5 — DS người dùng | `GET /users` | `apiListUsers` |
 | | API 6 — Tạo người dùng | `POST /users` | `apiCreateUser` |
 | | API 7 — Sửa / bật-tắt hoạt động | `PATCH /users/:id` | `apiUpdateUser` |
@@ -115,6 +117,9 @@ frontend/
 | | API 15 — Sửa trạm | `PUT /stations/:id` | `apiUpdateStation` |
 | | API 16 — Xóa mềm trạm | `DELETE /stations/:id` | `apiDeleteStation` |
 | | API 17 — Đặt ngưỡng lũ | `PUT /stations/:id/thresholds` | `apiSetStationThresholds` |
+| | API 40 — Tạo báo cáo danh sách trạm | `POST /reports` | `apiCreateReport` |
+| | API 42 — Trạng thái job báo cáo (poll) | `GET /reports/:jobId` | `apiGetReportJob` |
+| | API 43 — Tải file báo cáo (CSV / HTML) | `GET /reports/:jobId/download` | `apiDownloadReport` |
 | | (phụ trợ) DS tỉnh/thành | `GET /provinces` | `apiListProvinces` |
 | **ImportView.tsx** | API 18 — Import trạm hàng loạt (CSV) | `POST /stations/import` | `apiImportStations` |
 | | API 19 — Trạng thái job + báo cáo | `GET /stations/import/:jobId` | `apiGetImportJob` |
@@ -129,11 +134,13 @@ frontend/
 | | (phụ trợ) DS tỉnh/thành cho multiselect | `GET /provinces` | `apiListProvinces` |
 | **ForecastView.tsx** | API 36 — DS trạm nguy cơ 5–7 ngày | `GET /risk/stations` | `apiListRiskStations` |
 | | API 12 — Tổng số trạm (KPI "Trạm theo dõi") | `GET /stations` | `apiListStations` |
+| | API 20 — Số sự kiện đang hoạt động (KPI) | `GET /events?status=ONGOING` | `apiListEvents` |
+| | API 40/42/43 — Xuất báo cáo nguy cơ (Word/PDF) | `POST /reports` + poll + download | `exportReport` *(report.ts)* |
 | **HealthView.tsx** | API 35 — Sức khỏe nguồn ngoài | `GET /integrations/health` | `apiGetIntegrationsHealth` |
 | **Topbar.tsx** | API 35 — Chip nguồn chính *(Admin)* | `GET /integrations/health` | `apiGetIntegrationsHealth` |
 | | API 31 — Đồng bộ thời tiết thủ công *(Admin)* | `POST /weather/refresh` | `apiRefreshWeather` |
 
-**Nhóm API theo backend:** A — Auth (1,3) · B — Accounts/RBAC (5–11) · C — Stations & provinces (12–17 + viewport) + **Import (18, 19 ở ImportView)** · **D — Events (20, 25, 26 ở EventsView)** · F — Weather integration (31, 35) · **G — Risk/Forecast (36 ở ForecastView; 37/38/39 ở MapView)** · **I — Realtime WebSocket (44–47 ở MapView qua `realtime.ts`)**.
+**Nhóm API theo backend:** A — Auth (1,3) · B — Accounts/RBAC (5–11) · C — Stations & provinces (12–17 + viewport) + **Import (18, 19 ở ImportView)** · **D — Events (20, 25, 26 ở EventsView)** · F — Weather integration (31, 35) · **G — Risk/Forecast (36 ở ForecastView; 37/38/39 ở MapView)** · **H — Báo cáo (40, 42, 43 ở StationsView + ForecastView qua `report.ts`)** · **I — Realtime WebSocket (44–47 ở MapView qua `realtime.ts`)**.
 
 **Lưu ý về ForecastView (Group G):** gọi `apiListRiskStations({ size: 100, sort: 'severity', includeLow: true })` — **`size` phải ≤ 100** vì DTO backend giới hạn `@Max(100)` (gửi >100 → `400` → rơi về mock). Nếu Risk Engine chưa có dữ liệu / call lỗi, view **giữ dữ liệu mẫu** và đổi chip thành "Dữ liệu mẫu"; có dữ liệu thật → "Dữ liệu trực tiếp". 2 KPI *Nguy cơ Cao (≥50) / Rất cao (≥70)* hiện đếm từ trang đã tải (top 100 theo điểm) — chính xác cho nhóm điểm cao nhất, chưa phải tổng toàn mạng.
 
@@ -141,12 +148,11 @@ frontend/
 
 **Lưu ý về EventsView (Group D):** sự kiện thiên tai được **tự động tracking** từ chuỗi API thiên tai (GDACS→ReliefWeb→EONET) — **API 22 (tạo tay) đã bị gỡ**, view không còn form "Tạo sự kiện". Vòng đời chỉ có **2 trạng thái** `ONGOING`/`CLOSED` (bỏ draft/monitor); cột **"Mức độ" đã bỏ**; cột *Type* lấy từ `disasterType.name`. Drawer gọi **API 26** để hiển thị phạm vi (tỉnh + danh sách trạm N–N). **Lối vào ghi duy nhất** còn lại là **API 25**: chỉ **Operator/Admin** trên sự kiện **`ONGOING`** mới thấy multiselect tỉnh để gán/khoanh lại phạm vi (`provinceIds`) — lưu sẽ **thay thế** scope cũ và kích hoạt Risk Engine tính lại; Viewer hoặc sự kiện đã đóng chỉ xem chip read-only. Card hiển thị `provinceCount / stationCount` do backend trả kèm; sau khi lưu, số đếm được cập nhật **tại chỗ** (không reload, tránh nháy drawer).
 
-**Đã định nghĩa trong `api.ts` nhưng component chưa dùng:** `apiMe` (`GET /auth/me`), `apiGetWeatherJob` (`GET /weather/refresh/:jobId`), `apiGetStation` (`GET /stations/:id`), `apiListAllStations` (tải hết theo trang — giữ làm fallback của viewport). *(Group G đã dùng hết: 36 ở ForecastView, 37/38/39 ở MapView. Group D: 20/25/26 dùng ở EventsView; API 25 cũng nhận `affectedArea` GeoJSON nhưng UI hiện chỉ dùng chế độ chọn tỉnh. Group C Import: 18/19 dùng ở ImportView. Group I Realtime: 44–47 dùng ở MapView qua `realtime.ts`.)*
+**Đã định nghĩa trong `api.ts` nhưng component chưa dùng:** `apiMe` (`GET /auth/me`), `apiGetWeatherJob` (`GET /weather/refresh/:jobId`), `apiGetStation` (`GET /stations/:id`), `apiListAllStations` (tải hết theo trang — giữ làm fallback của viewport), `apiListReports` (**API 41** — lịch sử báo cáo, chưa hiển thị ở UI). *(Group G đã dùng hết: 36 ở ForecastView, 37/38/39 ở MapView. Group D: 20/25/26 dùng ở EventsView; API 25 cũng nhận `affectedArea` GeoJSON nhưng UI hiện chỉ dùng chế độ chọn tỉnh. Group C Import: 18/19 dùng ở ImportView. **Group H Báo cáo: 40/42/43 dùng ở StationsView (`station-inventory`) + ForecastView (`risk-summary`) qua `report.ts`**. Group I Realtime: 44–47 dùng ở MapView qua `realtime.ts`.)*
 
 ### Phần **còn mock** (chưa merge — chờ nhóm API khác)
 - **MapView.tsx** (một phần) — panel chi tiết (dự báo 7 ngày, lịch sử cảnh báo), scrubber "Mốc dự báo" (API 38/39/37) và realtime risk:delta (API 44–47) **đã là thật**; còn mock: lớp overlay thời tiết/mưa/gió (chờ **API 29** weather-tiles), lớp lũ + panel "Cảnh báo nguy cơ" (đọc `riskScore`/`weather` mà `GET /stations/viewport` chưa trả), và polygon sự kiện trên bản đồ (chưa wiring `affectedArea` của Group D vào layer Leaflet — drawer của EventsView đã có scope thật).
-- **ForecastView.tsx** (một phần) — nút *Xuất Word / Xuất PDF* mới chỉ hiện toast (chờ **API 40–43** render báo cáo, Nhóm H); bảng dữ liệu đã là thật (API 36).
-- **Nhóm H — Xuất báo cáo (API 40–43):** chưa có ở cả backend lẫn frontend.
+- **Nhóm H — Xuất báo cáo (API 40–43):** **backend đã xong** và **đã nối UI ở 2 chỗ**: **StationsView** xuất `station-inventory` (CSV / HTML in được), **ForecastView** xuất `risk-summary` (nút *Xuất Word* tải `.doc`, *Xuất PDF* mở bản in). Còn lại ở dạng "có API chưa gắn UI": **lịch sử báo cáo** (API 41) chưa có màn hình riêng.
 
 ---
 
@@ -200,6 +206,16 @@ Login gọi **`POST /auth/login` thật**: nhập username/password của tài k
 ---
 
 ## 7. Lịch sử thay đổi gần đây (đồng bộ với backend)
+
+### Sidebar — badge điều hướng dùng dữ liệu thật (API 36 + 20) *(mới nhất)*
+- Gỡ 2 badge **mock cứng** (`'8'` ở "Dự báo nguy cơ ngập", `'2'` ở "Sự kiện thiên tai") trong [`Sidebar.tsx`](app/src/components/Sidebar.tsx).
+- Badge **Dự báo** = số trạm nguy cơ **hôm nay** (`apiListRiskStations({from:today,to:today})` — cửa sổ 1 ngày ⇒ ~1 dòng/trạm, ẩn LOW); badge **Sự kiện** = số sự kiện `ONGOING` (`apiListEvents`). Hiển thị `99+` khi vượt 99, **ẩn khi = 0**. Tên/vai trò người dùng vốn đã là thật (`currentUser`).
+
+### Nhóm H — merge **StationsView** + **ForecastView** vào API xuất báo cáo (API 40–43)
+- Thêm client + type vào [`api.ts`](app/src/lib/api.ts): `apiCreateReport` (**API 40**), `apiListReports` (**API 41**), `apiGetReportJob` (**API 42**), `apiDownloadReport` (**API 43**, trả `Blob` + tên file đọc từ `Content-Disposition`, tự refresh 401); kèm type `ReportKind`, `ReportFormat`, `ReportMeta`, `ReportStatus`, `ReportSummary`, `CreateReportPayload`. Helper dùng chung ở [`lib/report.ts`](app/src/lib/report.ts): `exportReport` (tạo → poll → tải/in) + `pollReportJob`/`downloadBlob`/`printHtmlBlob`.
+- **StationsView** thêm nút **"Xuất báo cáo"** (Viewer+) với menu **CSV** / **Tài liệu in (PDF)**: tạo báo cáo `station-inventory` theo **đúng bộ lọc đang xem** (`provinceId`/`q`) → tải CSV hoặc mở HTML in được rồi `print()`.
+- **ForecastView** nối 2 nút **Xuất Word / Xuất PDF** (trước chỉ là toast) vào báo cáo `risk-summary`: *Word* tải file `.doc` (Word mở HTML), *PDF* mở bản in. KPI **"Sự kiện đang hoạt động"** chuyển từ mock `EVENTS` → **API 20** (`GET /events?status=ONGOING`, đọc `total`).
+- Backend render **CSV** (BOM cho Excel) hoặc **HTML in được** — "PDF/Word" không thêm thư viện. **Tối ưu tốc độ:** query `station-inventory` đổi từ `LATERAL` (chạy 1 lần/trạm ⇒ 10k lần) sang **CTE gộp sẵn** ngưỡng + nguy cơ (nhanh hơn nhiều ở 10k trạm). Lịch sử báo cáo (API 41) đã có ở backend nhưng **chưa gắn UI**.
 
 ### Nhóm C — merge **ImportView** vào API thật (import CSV async, API 18–19)
 - Thêm [`lib/csv.ts`](app/src/lib/csv.ts): `previewCsv` (parse + tiền kiểm định dạng phía client — alias header, khoảng tọa độ VN, trùng mã trong file; **chỉ cảnh báo**, backend mới có thẩm quyền) + `SAMPLE_CSV` (file mẫu tải xuống).

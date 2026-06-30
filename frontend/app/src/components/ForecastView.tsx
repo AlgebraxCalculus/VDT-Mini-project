@@ -1,8 +1,14 @@
 import { useEffect, useState } from 'react';
 import { useApp } from '../state/AppStateContext';
 import { STATIONS, EVENTS, forecast7d, riskMeta, floodLevel } from '../data/mockData';
-import { apiListRiskStations, apiListStations } from '../lib/api';
+import { ApiError, apiListEvents, apiListRiskStations, apiListStations } from '../lib/api';
+import { exportReport } from '../lib/report';
 import type { RiskAssessment } from '../types';
+
+/** Initial active-event count from mock data — replaced by API 20's total. */
+const MOCK_ACTIVE_EVENTS = EVENTS.filter(
+  (e) => e.state === 'active' || e.state === 'monitor',
+).length;
 
 /** One rendered table row: a station with its 7-day risk sparkline + peak. */
 interface FcRow {
@@ -107,6 +113,8 @@ export default function ForecastView() {
   const [rows, setRows] = useState<FcRow[]>(buildMockRows);
   const [live, setLive] = useState(false);
   const [total, setTotal] = useState<number>(STATIONS.length);
+  const [activeEvents, setActiveEvents] = useState<number>(MOCK_ACTIVE_EVENTS);
+  const [exporting, setExporting] = useState(false);
 
   // Load the at-risk station list from API 36 (grouped per station) + the total
   // station count from Group C. Keep the mock rows already on screen if the call
@@ -133,14 +141,44 @@ export default function ForecastView() {
       .catch(() => {
         /* keep mock count as fallback */
       });
+    // API 20 — count of ongoing events (KPI "Sự kiện đang hoạt động"). Only the
+    // total is needed, so request a single row.
+    apiListEvents({ status: 'ONGOING', size: 1 })
+      .then((res) => {
+        if (!cancelled) setActiveEvents(res.total);
+      })
+      .catch(() => {
+        /* keep mock count as fallback */
+      });
     return () => {
       cancelled = true;
     };
   }, []);
 
+  // Group H — export the risk summary (API 40–43). "Word" downloads the HTML
+  // report as a .doc (Word opens it); "PDF" opens the print-ready HTML and fires
+  // the print dialog. setState stays in this async handler, never in an effect.
+  const runReport = async (delivery: 'download' | 'print', asWord: boolean) => {
+    if (exporting) return;
+    setExporting(true);
+    showToast(asWord ? 'Đang tạo báo cáo Word…' : 'Đang tạo báo cáo PDF…');
+    try {
+      const stamp = new Date().toISOString().slice(0, 10);
+      const meta = await exportReport(
+        { kind: 'risk-summary', format: 'html' },
+        delivery,
+        asWord ? `bao-cao-nguy-co_${stamp}.doc` : undefined,
+      );
+      showToast(`Đã xuất báo cáo (${meta.rowCount.toLocaleString('vi-VN')} trạm nguy cơ).`);
+    } catch (e) {
+      showToast(e instanceof ApiError ? e.message : 'Xuất báo cáo thất bại.');
+    } finally {
+      setExporting(false);
+    }
+  };
+
   const fcHigh = rows.filter((r) => r.peakVal >= 50).length;
   const fcVeryHigh = rows.filter((r) => r.peakVal >= 70).length;
-  const fcActiveEvents = EVENTS.filter((e) => e.state === 'active' || e.state === 'monitor').length;
 
   return (
     <div style={{ position: 'absolute', inset: 0, overflow: 'auto', padding: '24px 28px' }} className="fws-fade">
@@ -163,7 +201,7 @@ export default function ForecastView() {
           </div>
           <div style={{ background: '#fff', border: '1px solid #E8EAEE', borderRadius: 14, padding: '16px 18px' }}>
             <div style={{ fontSize: 12, color: '#9AA0A6', fontWeight: 600 }}>Sự kiện đang hoạt động</div>
-            <div style={{ fontSize: 28, fontWeight: 800, fontFamily: "'IBM Plex Mono',monospace", marginTop: 4 }}>{fcActiveEvents}</div>
+            <div style={{ fontSize: 28, fontWeight: 800, fontFamily: "'IBM Plex Mono',monospace", marginTop: 4 }}>{activeEvents}</div>
             <div style={{ fontSize: 11.5, color: '#9AA0A6', marginTop: 2 }}>Bão / mưa lớn / lũ</div>
           </div>
         </div>
@@ -179,15 +217,19 @@ export default function ForecastView() {
           </span>
           <div style={{ flex: 1 }} />
           <button
-            onClick={() => showToast('Đang tạo báo cáo nguy cơ (Word)… sẽ tải về khi hoàn tất.')}
-            style={{ display: 'flex', alignItems: 'center', gap: 7, height: 38, padding: '0 14px', border: '1.5px solid #E2E5EA', background: '#fff', borderRadius: 9, fontSize: 13, fontWeight: 600, color: '#3A3F47', cursor: 'pointer' }}
+            onClick={() => runReport('download', true)}
+            disabled={exporting}
+            title="Tải báo cáo tổng hợp nguy cơ dạng Word (.doc)"
+            style={{ display: 'flex', alignItems: 'center', gap: 7, height: 38, padding: '0 14px', border: '1.5px solid #E2E5EA', background: '#fff', borderRadius: 9, fontSize: 13, fontWeight: 600, color: '#3A3F47', cursor: exporting ? 'default' : 'pointer', opacity: exporting ? 0.6 : 1 }}
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M6 3h8l4 4v14H6V3Z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" /><path d="M14 3v4h4" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" /></svg>
-            Xuất Word
+            {exporting ? 'Đang xuất…' : 'Xuất Word'}
           </button>
           <button
-            onClick={() => showToast('Đang tạo báo cáo nguy cơ (PDF)… sẽ tải về khi hoàn tất.')}
-            style={{ display: 'flex', alignItems: 'center', gap: 7, height: 38, padding: '0 16px', border: 'none', background: '#EE0033', borderRadius: 9, fontSize: 13, fontWeight: 700, color: '#fff', cursor: 'pointer', boxShadow: '0 4px 12px rgba(238,0,51,.24)' }}
+            onClick={() => runReport('print', false)}
+            disabled={exporting}
+            title="Mở báo cáo in được rồi lưu thành PDF từ trình duyệt"
+            style={{ display: 'flex', alignItems: 'center', gap: 7, height: 38, padding: '0 16px', border: 'none', background: '#EE0033', borderRadius: 9, fontSize: 13, fontWeight: 700, color: '#fff', cursor: exporting ? 'default' : 'pointer', boxShadow: '0 4px 12px rgba(238,0,51,.24)', opacity: exporting ? 0.6 : 1 }}
           >
             <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 3v11m0 0l-4-4m4 4l4-4" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /><path d="M5 17v2a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-2" stroke="#fff" strokeWidth="1.8" strokeLinecap="round" /></svg>
             Xuất báo cáo PDF

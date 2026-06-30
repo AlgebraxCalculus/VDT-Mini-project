@@ -8,6 +8,8 @@ export default function Login() {
 
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [remember, setRemember] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
@@ -22,7 +24,7 @@ export default function Login() {
     setError(null);
     setLoading(true);
     try {
-      const res = await apiLogin(u.trim(), p);
+      const res = await apiLogin(u.trim(), p, remember);
       patch({
         route: 'map',
         role: roleFromCode(res.user.role),
@@ -141,10 +143,29 @@ export default function Login() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && void submit()}
-                type="password"
+                type={showPassword ? 'text' : 'password'}
                 placeholder="Mật khẩu"
-                style={{ border: 'none', outline: 'none', flex: 1, fontSize: 14.5, color: '#16181D', background: 'transparent', letterSpacing: 1 }}
+                style={{ border: 'none', outline: 'none', flex: 1, fontSize: 14.5, color: '#16181D', background: 'transparent', letterSpacing: showPassword ? 0 : 1 }}
               />
+              <button
+                type="button"
+                onClick={() => setShowPassword((v) => !v)}
+                title={showPassword ? 'Ẩn mật khẩu' : 'Hiện mật khẩu'}
+                aria-label={showPassword ? 'Ẩn mật khẩu' : 'Hiện mật khẩu'}
+                style={{ flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 26, height: 26, border: 'none', background: 'transparent', cursor: 'pointer', color: '#9AA0A6', padding: 0 }}
+              >
+                {showPassword ? (
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                    <path d="M3 3l18 18" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                    <path d="M10.6 6.1A9.8 9.8 0 0 1 12 6c6.5 0 10 6 10 6a17.4 17.4 0 0 1-3 3.5M6.5 7.6A17.2 17.2 0 0 0 2 12s3.5 6 10 6a9.7 9.7 0 0 0 3.4-.6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+                  </svg>
+                ) : (
+                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
+                    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+                    <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.6" />
+                  </svg>
+                )}
+              </button>
             </div>
           </div>
 
@@ -154,16 +175,21 @@ export default function Login() {
               {error}
             </div>
           )}
-          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginTop: 16, fontSize: 13 }}>
-            <label style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#3A3F47', cursor: 'pointer' }}>
-              <span style={{ width: 17, height: 17, borderRadius: 5, background: '#EE0033', display: 'inline-flex', alignItems: 'center', justifyContent: 'center' }}>
-                <svg width="11" height="11" viewBox="0 0 24 24" fill="none">
-                  <path d="M5 12.5l4 4 10-10" stroke="#fff" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
+          <div style={{ display: 'flex', alignItems: 'center', marginTop: 16, fontSize: 13 }}>
+            <label
+              onClick={() => setRemember((v) => !v)}
+              title="Lưu phiên trên trình duyệt này (localStorage). Bỏ chọn: chỉ giữ trong tab hiện tại."
+              style={{ display: 'flex', alignItems: 'center', gap: 8, color: '#3A3F47', cursor: 'pointer', userSelect: 'none' }}
+            >
+              <span style={{ width: 17, height: 17, borderRadius: 5, background: remember ? '#EE0033' : '#fff', border: remember ? 'none' : '1.5px solid #C4C8CE', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', transition: 'background .15s' }}>
+                {remember && (
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none">
+                    <path d="M5 12.5l4 4 10-10" stroke="#fff" strokeWidth="2.6" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                )}
               </span>
               Ghi nhớ đăng nhập
             </label>
-            <a style={{ color: '#EE0033', fontWeight: 600, textDecoration: 'none', cursor: 'pointer' }}>Quên mật khẩu?</a>
           </div>
           <button
             onClick={() => void submit()}

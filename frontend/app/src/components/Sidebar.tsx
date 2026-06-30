@@ -1,6 +1,7 @@
+import { useEffect, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { useApp } from '../state/AppStateContext';
-import { apiLogout } from '../lib/api';
+import { apiListEvents, apiListRiskStations, apiLogout } from '../lib/api';
 import { closeRiskSocket } from '../lib/realtime';
 import { isLocked, ROLE_COLOR, ROLE_USER_NAME } from '../lib/role';
 import type { RouteKey } from '../types';
@@ -32,7 +33,6 @@ const NAV_TOP: NavItem[] = [
         <path d="M16 8h4v4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
     ),
-    badge: '8',
   },
 ];
 
@@ -66,7 +66,6 @@ const NAV_MANAGE: NavItem[] = [
         <path d="M12 10v4m0 3v.4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
       </svg>
     ),
-    badge: '2',
   },
 ];
 
@@ -103,6 +102,30 @@ const lockIcon = (
 export default function Sidebar() {
   const { state, patch } = useApp();
   const { sidebarOpen, role, route, currentUser } = state;
+
+  const [riskCount, setRiskCount] = useState<number | null>(null);
+  const [eventCount, setEventCount] = useState<number | null>(null);
+
+  // Live nav badges from real data: stations at risk *today* (API 36 with a
+  // single-day window ⇒ ~one row per station, LOW excluded) and ongoing events
+  // (API 20). setState only runs in async callbacks — never in the effect body.
+  useEffect(() => {
+    const today = new Date().toISOString().slice(0, 10);
+    apiListRiskStations({ from: today, to: today, size: 1 })
+      .then((res) => setRiskCount(res.total))
+      .catch(() => {});
+    apiListEvents({ status: 'ONGOING', size: 1 })
+      .then((res) => setEventCount(res.total))
+      .catch(() => {});
+  }, []);
+
+  const fmtBadge = (n: number | null): string | undefined =>
+    n == null || n <= 0 ? undefined : n > 99 ? '99+' : String(n);
+
+  const badges: Partial<Record<RouteKey, string | undefined>> = {
+    forecast: fmtBadge(riskCount),
+    events: fmtBadge(eventCount),
+  };
 
   // Revoke tokens server-side, then drop the session and return to login.
   const logout = () => {
@@ -147,13 +170,14 @@ export default function Sidebar() {
       )}
       {items.map((item) => {
         const locked = isLocked(role, item.key);
+        const badge = badges[item.key] ?? item.badge;
         return (
           <button key={item.key} onClick={() => goTo(item)} title={item.label} style={navBtn(item)}>
             <span style={{ flex: 'none', display: 'flex' }}>{item.icon}</span>
             {sidebarOpen && <span style={{ flex: 1, textAlign: 'left', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.label}</span>}
-            {sidebarOpen && item.badge && !locked && (
+            {sidebarOpen && badge && !locked && (
               <span style={{ flex: 'none', minWidth: 19, height: 19, padding: '0 5px', borderRadius: 9, background: '#EE0033', color: '#fff', fontSize: 11, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                {item.badge}
+                {badge}
               </span>
             )}
             {locked && <span style={{ flex: 'none', display: 'flex', opacity: 0.6 }}>{lockIcon}</span>}

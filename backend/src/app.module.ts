@@ -18,6 +18,7 @@ import { ProvincesModule } from './modules/provinces/provinces.module';
 import { RealtimeModule } from './modules/realtime/realtime.module';
 import { WeatherModule } from './modules/weather/weather.module';
 import { RiskModule } from './modules/risk/risk.module';
+import { ReportsModule } from './modules/reports/reports.module';
 
 @Module({
   imports: [
@@ -50,6 +51,7 @@ import { RiskModule } from './modules/risk/risk.module';
     RealtimeModule,
     WeatherModule,
     RiskModule,
+    ReportsModule,
   ],
   controllers: [AppController],
   providers: [

@@ -85,17 +85,37 @@ export interface CreateUserPayload {
 // Token storage (localStorage so a refresh survives a page reload).
 // ---------------------------------------------------------------------------
 
-export const getAccessToken = () => localStorage.getItem(ACCESS_KEY);
-export const getRefreshToken = () => localStorage.getItem(REFRESH_KEY);
+export const getAccessToken = () =>
+  sessionStorage.getItem(ACCESS_KEY) ?? localStorage.getItem(ACCESS_KEY);
+export const getRefreshToken = () =>
+  sessionStorage.getItem(REFRESH_KEY) ?? localStorage.getItem(REFRESH_KEY);
 
-function setTokens(access: string, refresh: string) {
-  localStorage.setItem(ACCESS_KEY, access);
-  localStorage.setItem(REFRESH_KEY, refresh);
+/**
+ * Persist the token pair. `remember` picks the backing store — localStorage
+ * (survives a browser restart) vs sessionStorage (dropped when the tab closes).
+ * That storage choice is the *only* thing the "Ghi nhớ đăng nhập" toggle does;
+ * there is no backend "remember me" — Group A just issues the JWT pair. When
+ * `remember` is omitted (the silent 401 refresh) the existing store is kept so a
+ * session-only login isn't silently promoted to persistent.
+ */
+function setTokens(access: string, refresh: string, remember?: boolean) {
+  const useSession =
+    remember === undefined
+      ? sessionStorage.getItem(ACCESS_KEY) !== null
+      : !remember;
+  const target = useSession ? sessionStorage : localStorage;
+  const other = useSession ? localStorage : sessionStorage;
+  other.removeItem(ACCESS_KEY);
+  other.removeItem(REFRESH_KEY);
+  target.setItem(ACCESS_KEY, access);
+  target.setItem(REFRESH_KEY, refresh);
 }
 
 export function clearTokens() {
   localStorage.removeItem(ACCESS_KEY);
   localStorage.removeItem(REFRESH_KEY);
+  sessionStorage.removeItem(ACCESS_KEY);
+  sessionStorage.removeItem(REFRESH_KEY);
 }
 
 // ---------------------------------------------------------------------------
@@ -202,13 +222,17 @@ function safeJson(text: string): unknown {
 // Group A — Authentication.
 // ---------------------------------------------------------------------------
 
-export async function apiLogin(username: string, password: string): Promise<LoginResponse> {
+export async function apiLogin(
+  username: string,
+  password: string,
+  remember = true,
+): Promise<LoginResponse> {
   const data = await request<LoginResponse>('/auth/login', {
     method: 'POST',
     body: { username, password },
     auth: false,
   });
-  setTokens(data.access_token, data.refresh_token);
+  setTokens(data.access_token, data.refresh_token, remember);
   return data;
 }
 
@@ -716,4 +740,117 @@ export function apiGetStationAlertHistory(
   return request<PaginatedAlertHistory>(
     `/stations/${stationId}/alert-history?${qs.toString()}`,
   );
+}
+
+// ---------------------------------------------------------------------------
+// Group H — report export (APIs 40–43). Async render → poll → download.
+//   • 40 POST /reports                — request a render → 202 { jobId, … }
+//   • 41 GET  /reports                — recent report jobs (history)
+//   • 42 GET  /reports/{jobId}        — job state + progress + metadata
+//   • 43 GET  /reports/{jobId}/download — stream the rendered file (blob)
+// The server renders CSV (data) or print-ready HTML; "PDF" = print the HTML.
+// ---------------------------------------------------------------------------
+
+export type ReportKind = 'station-inventory' | 'risk-summary';
+export type ReportFormat = 'csv' | 'html';
+
+/** POST /reports body — same filters the StationsView list uses. */
+export interface CreateReportPayload {
+  kind?: ReportKind;
+  format?: ReportFormat;
+  provinceId?: number;
+  q?: string;
+  from?: string;
+  to?: string;
+}
+
+/** Metadata the worker attaches once a report finishes (mirrors backend ReportMeta). */
+export interface ReportMeta {
+  kind: ReportKind;
+  format: ReportFormat;
+  filename: string;
+  contentType: string;
+  rowCount: number;
+  byteSize: number;
+  title: string;
+}
+
+/** API 42 — one report job's live state (mirrors backend ReportStatus). */
+export interface ReportStatus {
+  jobId: string;
+  state: string; // waiting | active | completed | failed | …
+  progress: number; // 0–100
+  meta: ReportMeta | null;
+  failedReason: string | null;
+}
+
+/** API 41 — one row of the recent-reports history. */
+export interface ReportSummary {
+  jobId: string;
+  state: string;
+  requestedAt: string | null;
+  triggeredBy: number | null;
+  params: {
+    kind: ReportKind;
+    format: ReportFormat;
+    provinceId?: number;
+    q?: string;
+    from?: string;
+    to?: string;
+  };
+  meta: ReportMeta | null;
+}
+
+/** API 40 — POST /reports. Enqueues the render job → { jobId, kind, format }. */
+export const apiCreateReport = (body: CreateReportPayload) =>
+  request<{ jobId: string; kind: ReportKind; format: ReportFormat }>('/reports', {
+    method: 'POST',
+    body,
+  });
+
+/** API 41 — GET /reports. */
+export const apiListReports = () => request<ReportSummary[]>('/reports');
+
+/** API 42 — GET /reports/{jobId}. */
+export const apiGetReportJob = (jobId: string) =>
+  request<ReportStatus>(`/reports/${jobId}`);
+
+/**
+ * API 43 — GET /reports/{jobId}/download. Returns the raw bytes as a Blob plus
+ * the server-suggested filename (parsed from Content-Disposition). Goes outside
+ * `request` (which assumes JSON) but mirrors its one-shot 401 refresh.
+ */
+export async function apiDownloadReport(
+  jobId: string,
+): Promise<{ blob: Blob; filename: string }> {
+  const send = (): Promise<Response> => {
+    const token = getAccessToken();
+    return fetch(`${API_BASE}/reports/${jobId}/download`, {
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+    });
+  };
+
+  let res: Response;
+  try {
+    res = await send();
+    if (res.status === 401 && getRefreshToken() && (await tryRefresh())) {
+      res = await send();
+    }
+  } catch {
+    throw new ApiError(0, 'Không kết nối được tới máy chủ. Kiểm tra API đã chạy chưa.');
+  }
+
+  if (!res.ok) {
+    const text = await res.text();
+    const data = text ? safeJson(text) : null;
+    const msg = (data as { message?: string | string[] } | null)?.message;
+    const message = Array.isArray(msg) ? msg.join(', ') : msg ?? res.statusText;
+    throw new ApiError(res.status, message);
+  }
+
+  const blob = await res.blob();
+  const cd = res.headers.get('Content-Disposition') ?? '';
+  const match = /filename="?([^"]+)"?/.exec(cd);
+  const filename = match?.[1] ?? `bao-cao-${jobId}`;
+  return { blob, filename };
 }

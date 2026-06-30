@@ -11,7 +11,8 @@ import {
   apiSetStationThresholds,
   apiUpdateStation,
 } from '../lib/api';
-import type { ThresholdInput } from '../lib/api';
+import type { ReportFormat, ThresholdInput } from '../lib/api';
+import { exportReport } from '../lib/report';
 import type { ProvinceRef, Station } from '../types';
 
 const PAGE_SIZE = 20;
@@ -36,6 +37,21 @@ const LNG_MAX = 118;
 
 const TIER_LABEL: Record<1 | 2 | 3, string> = { 1: 'Chú ý', 2: 'Cảnh báo', 3: 'Nguy hiểm' };
 
+const exportItemStyle: CSSProperties = {
+  display: 'flex',
+  flexDirection: 'column',
+  alignItems: 'flex-start',
+  gap: 2,
+  width: '100%',
+  padding: '10px 14px',
+  border: 'none',
+  background: '#fff',
+  cursor: 'pointer',
+  textAlign: 'left',
+  fontSize: 13,
+  color: '#16181D',
+};
+
 type DrawerStringKey = 'stationCode' | 'name' | 'lat' | 'lng' | 'elevation' | 'th1' | 'th2' | 'th3';
 
 const fmt1 = (v: number | null) => (v == null ? '—' : v.toFixed(1));
@@ -54,8 +70,33 @@ export default function StationsView() {
   const [provinces, setProvinces] = useState<ProvinceRef[]>([]);
   const [saving, setSaving] = useState(false);
   const [pageInput, setPageInput] = useState('1');
+  const [exporting, setExporting] = useState(false);
+  const [exportMenu, setExportMenu] = useState(false);
 
   const reload = () => setReloadKey((k) => k + 1);
+
+  // API 40–43 — export the current (filtered) station list as a report. CSV
+  // downloads directly; HTML opens print-ready (→ PDF). Honors the same
+  // province/search filters as the table so the export matches the view.
+  const runExport = async (format: ReportFormat) => {
+    if (exporting) return;
+    setExportMenu(false);
+    setExporting(true);
+    showToast('Đang tạo báo cáo…');
+    try {
+      const provinceId = stnProv === 'all' ? undefined : Number(stnProv);
+      const q = stnQuery.trim() || undefined;
+      const meta = await exportReport(
+        { kind: 'station-inventory', format, provinceId, q },
+        format === 'html' ? 'print' : 'download',
+      );
+      showToast(`Đã xuất báo cáo (${meta.rowCount.toLocaleString('vi-VN')} trạm).`);
+    } catch (e) {
+      showToast(e instanceof ApiError ? e.message : 'Xuất báo cáo thất bại.');
+    } finally {
+      setExporting(false);
+    }
+  };
 
   // Province reference list for the filter dropdown (loaded once).
   useEffect(() => {
@@ -280,6 +321,32 @@ export default function StationsView() {
           </select>
           <div style={{ fontSize: 12.5, color: '#9AA0A6' }}>{total} trạm</div>
           <div style={{ flex: 1 }} />
+          <div style={{ position: 'relative' }}>
+            <button
+              onClick={() => setExportMenu((v) => !v)}
+              disabled={exporting}
+              title="Xuất báo cáo danh sách trạm (CSV / PDF) theo bộ lọc hiện tại"
+              style={{ display: 'flex', alignItems: 'center', gap: 7, height: 40, padding: '0 14px', border: '1.5px solid #E2E5EA', background: '#fff', borderRadius: 10, fontSize: 13.5, fontWeight: 600, color: '#3A3F47', cursor: exporting ? 'default' : 'pointer', opacity: exporting ? 0.6 : 1 }}
+            >
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 3v12m0 0 4-4m-4 4-4-4M5 19h14" stroke="#6B7280" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              {exporting ? 'Đang xuất…' : 'Xuất báo cáo'}
+            </button>
+            {exportMenu && !exporting && (
+              <>
+                <div onClick={() => setExportMenu(false)} style={{ position: 'fixed', inset: 0, zIndex: 30 }} />
+                <div style={{ position: 'absolute', top: 46, right: 0, zIndex: 31, width: 210, background: '#fff', border: '1px solid #E8EAEE', borderRadius: 10, boxShadow: '0 10px 30px rgba(16,20,30,.14)', overflow: 'hidden' }}>
+                  <button onClick={() => runExport('csv')} style={exportItemStyle}>
+                    <span style={{ fontWeight: 600 }}>Bảng tính CSV</span>
+                    <span style={{ fontSize: 11, color: '#9AA0A6' }}>Tải về để mở bằng Excel</span>
+                  </button>
+                  <button onClick={() => runExport('html')} style={{ ...exportItemStyle, borderTop: '1px solid #F2F3F5' }}>
+                    <span style={{ fontWeight: 600 }}>Tài liệu in (PDF)</span>
+                    <span style={{ fontSize: 11, color: '#9AA0A6' }}>Mở bản in → lưu thành PDF</span>
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
           {canWrite && (
             <button
               onClick={() => openDrawer('add')}
