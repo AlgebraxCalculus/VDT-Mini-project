@@ -33,11 +33,9 @@ interface ValidRow {
 
 /**
  * BullMQ worker for station import (API 18). Loads existing codes once, then walks
- * the records in batches of {@link IMPORT_BATCH_SIZE}, each batch wrapped in its own
- * transaction. Invalid rows are skipped + collected into the report (they don't
- * abort the batch); valid rows are inserted with geom + ST_Contains province
- * assignment (same statement as StationsService.create). The job does not retry
- * (attempts: 1) because re-running it would re-evaluate already-committed batches.
+ * records in {@link IMPORT_BATCH_SIZE} batches, each in its own transaction. Invalid
+ * rows are skipped into the report without aborting the batch; valid rows are inserted
+ * with geom + province assignment. attempts: 1 — re-running would re-commit batches.
  */
 @Processor(STATION_IMPORT_QUEUE)
 export class StationImportProcessor extends WorkerHost {
@@ -46,8 +44,7 @@ export class StationImportProcessor extends WorkerHost {
   constructor(
     private readonly dataSource: DataSource,
     private readonly eventBus: EventBusService,
-    // Resolves (and auto-creates, via geocoding) the province per coordinate —
-    // so imported stations outside the seeded provinces still get a province_id.
+    // Resolves (auto-creating via geocoding) the province per coordinate.
     private readonly provinceResolver: ProvinceResolverService,
   ) {
     super();
@@ -57,8 +54,7 @@ export class StationImportProcessor extends WorkerHost {
     const { records } = job.data;
     const total = records.length;
 
-    // station_code is UNIQUE across all rows (incl. soft-deleted) — pre-load the
-    // set once so duplicate detection is a memory lookup, not a query per row.
+    // Pre-load all codes once so duplicate detection is a memory lookup, not a query per row.
     const existing = await this.loadExistingCodes();
     const seen = new Set<string>(); // in-file duplicates
 
@@ -70,10 +66,8 @@ export class StationImportProcessor extends WorkerHost {
     for (let start = 0; start < total; start += IMPORT_BATCH_SIZE) {
       const batch = records.slice(start, start + IMPORT_BATCH_SIZE);
 
-      // Pre-pass (no transaction): validate, then resolve each province. Province
-      // resolution may reverse-geocode + create a province, so it must NOT run
-      // inside the insert transaction (a network call would hold the DB lock and,
-      // at 1 req/s, keep it open for minutes).
+      // Pre-pass (no transaction): validate, then resolve each province. Resolution
+      // may reverse-geocode (1 req/s) so it must not hold the insert transaction's lock.
       const ready: { row: ValidRow; provinceId: number | null }[] = [];
       for (const rec of batch) {
         const result = this.validate(rec, seen, existing);
@@ -87,7 +81,7 @@ export class StationImportProcessor extends WorkerHost {
           }
           continue;
         }
-        // Reserve the code now so later rows in the file can't collide with it.
+        // Reserve the code so later rows can't collide with it.
         seen.add(result.row.stationCode);
         existing.add(result.row.stationCode);
         const provinceId = await this.provinceResolver.resolveProvinceId(
@@ -109,8 +103,7 @@ export class StationImportProcessor extends WorkerHost {
       await job.updateProgress(Math.round((processed / total) * 100));
     }
 
-    // Seeding thresholds feeds risk inputs → nudge the Risk Engine per station
-    // (fire-and-forget; a bus failure must not fail the completed import).
+    // Nudge the Risk Engine per station that got thresholds (fire-and-forget).
     for (const id of thresholdStationIds) this.emitThresholdChanged(id);
 
     return {
@@ -122,9 +115,7 @@ export class StationImportProcessor extends WorkerHost {
     };
   }
 
-  // --------------------------------------------------------------------------
-  // Internals.
-  // --------------------------------------------------------------------------
+  // --- Internals ---
 
   private async loadExistingCodes(): Promise<Set<string>> {
     const rows = await this.dataSource
@@ -209,8 +200,7 @@ export class StationImportProcessor extends WorkerHost {
     });
     const id = result.identifiers[0].id as number;
 
-    // geom (SRID 4326); province_id was already resolved in the pre-pass (spatial
-    // fast-path, else geocode + auto-create). geom is never written via entity save.
+    // geom (SRID 4326); province_id resolved in the pre-pass. geom is never written via entity save.
     await manager.query(
       `UPDATE stations
           SET geom = ST_SetSRID(ST_MakePoint($1, $2), 4326),

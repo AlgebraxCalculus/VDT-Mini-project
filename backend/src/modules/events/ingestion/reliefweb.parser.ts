@@ -1,26 +1,13 @@
 /**
- * ReliefWeb (UN OCHA) disasters → normalized disaster events.
- *
- * ReliefWeb is the *last-resort* fallback for event ingestion — used only when both
- * GDACS and EONET are unreachable. Its records are **country-level with no
- * geometry** (the feed is already filtered to Vietnam), so unlike GDACS/EONET we
- * cannot derive a precise footprint. We therefore assign a Vietnam-wide bounding
- * box as the affected geometry: the event is tracked and shows up in the list/KPI,
- * but its scope is coarse (effectively the whole country). This is deliberate and
- * documented — a coarse event beats no event when the geometry-bearing sources are
- * down; the next successful GDACS/EONET run supersedes it with a precise scope.
- *
- * Payload: `{ data: [{ id, fields: { name, status, date:{created},
- * primary_type:{name}, primary_country:{name} } }] }`.
+ * ReliefWeb (UN OCHA) disasters → normalized disaster events. Last-resort event
+ * fallback (GDACS and EONET both down). Records are country-level with no geometry,
+ * so scope is a Vietnam-wide bbox — coarse, but a tracked event beats none; the next
+ * GDACS/EONET run supersedes it with a precise footprint.
  */
 
 import { AffectedGeom, NormalizedDisaster, parseDate } from './gdacs.parser';
 
-/**
- * Vietnam's approximate bounding box (lon/lat, WGS84). Spans ~8°×15.5° — within the
- * sanity limits used elsewhere — and intersects every province, giving the
- * country-wide scope described above.
- */
+/** Vietnam's approximate bbox (WGS84); intersects every province. */
 export const VIETNAM_BBOX: AffectedGeom = {
   kind: 'bbox',
   minX: 102.0,
@@ -53,10 +40,10 @@ export function parseReliefWebEvents(raw: unknown): NormalizedDisaster[] {
 
     const typeName = str(pluck(fields.primary_type, 'name'));
     const mapped = typeName ? mapType(typeName) : null;
-    if (!mapped) continue; // not a hazard we model
+    if (!mapped) continue;
 
     const status = (str(fields.status) ?? '').toLowerCase();
-    if (status && !ACTIVE_STATUSES.has(status)) continue; // e.g. 'past'
+    if (status && !ACTIVE_STATUSES.has(status)) continue;
 
     out.push({
       externalId: id,
@@ -73,9 +60,7 @@ export function parseReliefWebEvents(raw: unknown): NormalizedDisaster[] {
   return out;
 }
 
-// ---------------------------------------------------------------------------
-// Internals
-// ---------------------------------------------------------------------------
+// --- Internals ---
 
 interface RawRow {
   id?: unknown;

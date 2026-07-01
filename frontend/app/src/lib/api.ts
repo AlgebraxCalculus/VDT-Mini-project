@@ -1,7 +1,5 @@
-// Thin REST client for the NestJS backend (Group A — Auth, Group B — Accounts,
-// Group C — Stations & provinces). Handles JWT persistence, the Authorization
-// header, and a one-shot refresh on 401 so an expired access token is
-// transparently rotated mid-session.
+// REST client for the NestJS backend: JWT persistence + a one-shot 401 refresh
+// that transparently rotates an expired access token mid-session.
 
 import type {
   AlertHistoryEntry,
@@ -22,9 +20,7 @@ export const API_BASE = (
 const ACCESS_KEY = 'fws_access_token';
 const REFRESH_KEY = 'fws_refresh_token';
 
-// ---------------------------------------------------------------------------
-// Backend response shapes (mirror auth.service / users.service).
-// ---------------------------------------------------------------------------
+// --- Backend response shapes (mirror auth.service / users.service) ---
 
 export type RoleCode = 'ADMIN' | 'OPERATOR' | 'VIEWER';
 
@@ -81,9 +77,7 @@ export interface CreateUserPayload {
   roleId: number;
 }
 
-// ---------------------------------------------------------------------------
-// Token storage (localStorage so a refresh survives a page reload).
-// ---------------------------------------------------------------------------
+// --- Token storage ---
 
 export const getAccessToken = () =>
   sessionStorage.getItem(ACCESS_KEY) ?? localStorage.getItem(ACCESS_KEY);
@@ -91,12 +85,9 @@ export const getRefreshToken = () =>
   sessionStorage.getItem(REFRESH_KEY) ?? localStorage.getItem(REFRESH_KEY);
 
 /**
- * Persist the token pair. `remember` picks the backing store — localStorage
- * (survives a browser restart) vs sessionStorage (dropped when the tab closes).
- * That storage choice is the *only* thing the "Ghi nhớ đăng nhập" toggle does;
- * there is no backend "remember me" — Group A just issues the JWT pair. When
- * `remember` is omitted (the silent 401 refresh) the existing store is kept so a
- * session-only login isn't silently promoted to persistent.
+ * Persist the token pair. `remember` picks the store: localStorage (survives restart)
+ * vs sessionStorage (dropped on tab close) — the only effect of the "Ghi nhớ" toggle.
+ * When omitted (the silent refresh) the current store is kept.
  */
 function setTokens(access: string, refresh: string, remember?: boolean) {
   const useSession =
@@ -118,9 +109,7 @@ export function clearTokens() {
   sessionStorage.removeItem(REFRESH_KEY);
 }
 
-// ---------------------------------------------------------------------------
-// Error type — carries the HTTP status so callers can branch (401/403/409…).
-// ---------------------------------------------------------------------------
+// --- Error type — carries the HTTP status so callers can branch ---
 
 export class ApiError extends Error {
   status: number;
@@ -162,7 +151,7 @@ async function tryRefresh(): Promise<boolean> {
         return false;
       }
     })().finally(() => {
-      // Reset on the next tick so callers awaiting this promise still read it.
+      // Reset next tick so awaiting callers still read the resolved value.
       setTimeout(() => {
         refreshing = null;
       }, 0);
@@ -190,7 +179,7 @@ async function request<T>(path: string, opts: RequestOptions = {}, retry = true)
     throw new ApiError(0, 'Không kết nối được tới máy chủ. Kiểm tra API đã chạy chưa.');
   }
 
-  // Transparent token rotation: refresh once, then replay the original request.
+  // Refresh once, then replay the request.
   if (res.status === 401 && auth && retry && getRefreshToken()) {
     const ok = await tryRefresh();
     if (ok) return request<T>(path, opts, false);
@@ -218,9 +207,7 @@ function safeJson(text: string): unknown {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Group A — Authentication.
-// ---------------------------------------------------------------------------
+// --- Group A — Authentication ---
 
 export async function apiLogin(
   username: string,
@@ -240,10 +227,10 @@ export async function apiLogin(
 export async function apiLogout(): Promise<void> {
   const rt = getRefreshToken();
   try {
-    // refresh_token is @IsJWT() — only call when we actually hold one.
+    // refresh_token is @IsJWT() — only call when we hold one.
     if (rt) await request<void>('/auth/logout', { method: 'POST', body: { refresh_token: rt } });
   } catch {
-    // Logout is best-effort; clear locally regardless.
+    // Best-effort; clear locally regardless.
   } finally {
     clearTokens();
   }
@@ -251,9 +238,7 @@ export async function apiLogout(): Promise<void> {
 
 export const apiMe = () => request<AuthUser>('/auth/me');
 
-// ---------------------------------------------------------------------------
-// Group B — Accounts & RBAC (Admin-only on the server).
-// ---------------------------------------------------------------------------
+// --- Group B — Accounts & RBAC (Admin-only on the server) ---
 
 export function apiListUsers(params: {
   role?: RoleCode;
@@ -283,12 +268,7 @@ export const apiChangeRole = (id: number, roleId: number) =>
 
 export const apiListRoles = () => request<ApiRole[]>('/roles');
 
-// ---------------------------------------------------------------------------
-// Group C — Stations & provinces.
-// Response rows reuse the shared `Station` / `ProvinceRef` / `Threshold` types
-// (they mirror the backend contract). The list endpoint includes thresholds
-// (batched server-side); geom/boundary are never sent.
-// ---------------------------------------------------------------------------
+// --- Group C — Stations & provinces (geom/boundary never sent) ---
 
 export interface PaginatedStations {
   data: Station[];
@@ -349,12 +329,8 @@ export interface ViewportBounds {
 }
 
 /**
- * GET /stations/viewport — stations inside the current map BBOX. The server
- * runs a GIST-indexed ST_MakeEnvelope/ST_Contains, so the result set is bounded
- * by what's on screen (one request, no paging) — far lighter than
- * apiListAllStations as the map zooms in. Rows are risk-ordered server-side.
- * `riskStatus` optionally filters; `limit` caps the rows for a fully zoomed-out
- * view (defaults to the server cap).
+ * GET /stations/viewport — stations inside the map BBOX (one request, no paging),
+ * risk-ordered server-side. `riskStatus` filters; `limit` caps the rows.
  */
 export function apiListStationsInViewport(
   bounds: ViewportBounds,
@@ -371,10 +347,8 @@ export function apiListStationsInViewport(
 }
 
 /**
- * Fetch every matching station across pages (the server caps `size` at 100 and
- * has no viewport/bbox param yet). Used by the map, which needs all points to
- * cluster client-side. Interim approach — fine at seed scale, heavy at 10k+;
- * replace with a bbox endpoint when one exists. `maxStations` is a safety cap.
+ * Fetch every matching station across pages (server caps `size` at 100). Fallback
+ * for callers needing all points; heavy at 10k+. `maxStations` is a safety cap.
  */
 export async function apiListAllStations(
   params: Omit<ListStationsParams, 'page' | 'size'> = {},
@@ -393,7 +367,7 @@ export async function apiListAllStations(
 export const apiCreateStation = (dto: CreateStationPayload) =>
   request<Station>('/stations', { method: 'POST', body: dto });
 
-// station_code is immutable — only name/coords/elevation are updatable.
+// station_code is immutable — only name/coords/elevation update.
 export const apiUpdateStation = (id: number, dto: UpdateStationPayload) =>
   request<Station>(`/stations/${id}`, { method: 'PUT', body: dto });
 
@@ -403,9 +377,7 @@ export const apiDeleteStation = (id: number) =>
 export const apiSetStationThresholds = (id: number, thresholds: ThresholdInput[]) =>
   request<Threshold[]>(`/stations/${id}/thresholds`, { method: 'PUT', body: { thresholds } });
 
-// ---------------------------------------------------------------------------
-// Group C — bulk import (APIs 18–19). Multipart upload → async BullMQ job.
-// ---------------------------------------------------------------------------
+// --- Group C — bulk import (APIs 18–19). Multipart upload → async BullMQ job ---
 
 /** One skipped row in the import report (mirrors backend ImportRowError). */
 export interface ImportRowError {
@@ -426,16 +398,15 @@ export interface ImportReport {
 /** Job state + progress + report (mirrors backend StationImportService.getStatus). */
 export interface ImportStatus {
   jobId: string;
-  state: string; // waiting | active | completed | failed | …
+  state: string;
   progress: number; // 0–100
   report: ImportReport | null;
   failedReason: string | null;
 }
 
 /**
- * API 18 — POST /stations/import (multipart). Sends the raw file under field
- * `file`; the browser sets the multipart Content-Type/boundary, so we don't go
- * through `request` (which forces JSON). Mirrors `request`'s one-shot 401 refresh.
+ * API 18 — POST /stations/import (multipart). Bypasses `request` (which forces JSON)
+ * so the browser sets the multipart boundary; mirrors its one-shot 401 refresh.
  */
 export async function apiImportStations(file: File): Promise<{ jobId: string }> {
   const send = async (): Promise<Response> => {
@@ -475,16 +446,9 @@ export const apiGetImportJob = (jobId: string) =>
 
 export const apiListProvinces = () => request<ProvinceRef[]>('/provinces');
 
-// ---------------------------------------------------------------------------
-// Group D — Disaster events. Events are tracked automatically from GDACS (manual
-// create was removed); these read the auto-tracked data and let an operator
-// override scope. Shapes mirror events.service.ts (EventWithScope / EventScope).
-//   • 20 GET  /events                  — paginated events + scope counts
-//   • 25 POST /events/{id}/impact      — (re)assign scope (Operator/Admin)
-//   • 26 GET  /events/{id}/stations    — provinces + paginated stations in scope
-// ---------------------------------------------------------------------------
+// --- Group D — Disaster events (auto-tracked from GDACS; operator can override scope) ---
 
-/** Backend EventStatus — the only two lifecycle states (no draft/monitor). */
+/** Backend EventStatus — the only two lifecycle states. */
 export type EventStatus = 'ONGOING' | 'CLOSED';
 
 export interface ApiDisasterType {
@@ -582,22 +546,11 @@ export interface AssignImpactPayload {
   affectedArea?: GeoJsonPolygon;
 }
 
-/**
- * API 25 — POST /events/{id}/impact (Operator/Admin). Manually (re)assigns the
- * event's scope; REPLACES the auto-assigned scope and returns the fresh scope.
- */
+/** API 25 — POST /events/{id}/impact. (Re)assigns scope, replacing the auto-assigned one. */
 export const apiAssignImpact = (eventId: string, body: AssignImpactPayload) =>
   request<EventScope>(`/events/${eventId}/impact`, { method: 'POST', body });
 
-// ---------------------------------------------------------------------------
-// Group E — Map / GIS by viewport BBOX (APIs 27–30). All read-only, Viewer+.
-//   • 27 GET /map/stations          — in-view stations + risk, clustered zoomed-out
-//   • 28 GET /map/events            — active events + affected polygon in viewport
-//   • 29 GET /map/weather           — forecast field overlay (rain/wind/temp) points
-//   • 30 GET /map/stations/search   — free-text + risk filter within the viewport
-// Shapes mirror map.service.ts. /map/stations returns enriched, Station-compatible
-// rows so the existing map rendering consumes them directly.
-// ---------------------------------------------------------------------------
+// --- Group E — Map / GIS by viewport BBOX (APIs 27–30), read-only ---
 
 /** One grid-cell cluster (API 27, zoomed-out mode). */
 export interface MapCluster {
@@ -650,9 +603,8 @@ function bboxParams(b: ViewportBounds): URLSearchParams {
 }
 
 /**
- * API 27 — GET /map/stations. Stations inside the BBOX enriched with risk score/
- * severity + a light forecast snapshot; the server clusters into grid cells when
- * `zoom` is below its threshold ("gộp marker khi zoom-out"). Pass the live map zoom.
+ * API 27 — GET /map/stations. In-view stations enriched with risk + a light forecast;
+ * the server clusters when `zoom` is below its threshold. Pass the live map zoom.
  */
 export function apiGetMapStations(
   bounds: ViewportBounds,
@@ -697,11 +649,7 @@ export function apiSearchMapStations(
   return request<Station[]>(`/map/stations/search?${qs.toString()}`);
 }
 
-// ---------------------------------------------------------------------------
-// Group F — third-party weather integration.
-//   • Healthcheck (API 35) is Admin-only on the server.
-//   • Manual refresh + job status (APIs 31–32) are Operator/Admin.
-// ---------------------------------------------------------------------------
+// --- Group F — third-party weather integration (health Admin-only; refresh Operator/Admin) ---
 
 /** One external source's last cached healthcheck — mirrors backend SourceHealth. */
 export interface SourceHealth {
@@ -719,11 +667,7 @@ export interface SourceHealth {
 export const apiGetIntegrationsHealth = () =>
   request<SourceHealth[]>('/integrations/health');
 
-/**
- * POST /integrations/health/refresh (Admin-only) — probe every source now and
- * return the fresh results. Slower than the GET (it actually pings each source),
- * but reflects config changes immediately instead of waiting for the cron.
- */
+/** POST /integrations/health/refresh (Admin-only) — probe every source now and return fresh results. */
 export const apiRefreshIntegrationsHealth = () =>
   request<SourceHealth[]>('/integrations/health/refresh', { method: 'POST' });
 
@@ -751,8 +695,7 @@ export interface RefreshWeatherPayload {
   source?: string;
 }
 
-/** API 31 — POST /weather/refresh → 202 { jobId }. Throws ApiError 429 if a
- *  refresh is already in flight (the in-flight jobId rides along on the error). */
+/** API 31 — POST /weather/refresh → 202 { jobId }. ApiError 429 if one is in flight. */
 export const apiRefreshWeather = (body: RefreshWeatherPayload = {}) =>
   request<{ jobId: string }>('/weather/refresh', { method: 'POST', body });
 
@@ -767,14 +710,7 @@ export interface WeatherJobStatus {
 export const apiGetWeatherJob = (jobId: string) =>
   request<WeatherJobStatus>(`/weather/refresh/${jobId}`);
 
-// ---------------------------------------------------------------------------
-// Group G — Risk engine read side (APIs 36–39). All read-only, Viewer+.
-//   • 36 GET /risk/stations              — paginated at-risk stations
-//   • 37 GET /forecasts/provinces/{id}   — province forecast series
-//   • 38 GET /forecasts/stations/{id}    — station forecast series (classified)
-//   • 39 GET /stations/{id}/alert-history — paginated alert history
-// Response shapes mirror risk.service.ts; risk_score is on the 0–100 scale.
-// ---------------------------------------------------------------------------
+// --- Group G — Risk engine read side (APIs 36–39), read-only; risk_score 0–100 ---
 
 /** Sort key for GET /risk/stations — highest score first, or nearest in time. */
 export type RiskSort = 'severity' | 'timeline';
@@ -876,14 +812,7 @@ export function apiGetStationAlertHistory(
   );
 }
 
-// ---------------------------------------------------------------------------
-// Group H — report export (APIs 40–43). Async render → poll → download.
-//   • 40 POST /reports                — request a render → 202 { jobId, … }
-//   • 41 GET  /reports                — recent report jobs (history)
-//   • 42 GET  /reports/{jobId}        — job state + progress + metadata
-//   • 43 GET  /reports/{jobId}/download — stream the rendered file (blob)
-// The server renders CSV (data) or print-ready HTML; "PDF" = print the HTML.
-// ---------------------------------------------------------------------------
+// --- Group H — report export (APIs 40–43): async render → poll → download; "PDF" = print the HTML ---
 
 export type ReportKind = 'station-inventory' | 'risk-summary';
 export type ReportFormat = 'csv' | 'html';
@@ -912,7 +841,7 @@ export interface ReportMeta {
 /** API 42 — one report job's live state (mirrors backend ReportStatus). */
 export interface ReportStatus {
   jobId: string;
-  state: string; // waiting | active | completed | failed | …
+  state: string;
   progress: number; // 0–100
   meta: ReportMeta | null;
   failedReason: string | null;
@@ -950,9 +879,8 @@ export const apiGetReportJob = (jobId: string) =>
   request<ReportStatus>(`/reports/${jobId}`);
 
 /**
- * API 43 — GET /reports/{jobId}/download. Returns the raw bytes as a Blob plus
- * the server-suggested filename (parsed from Content-Disposition). Goes outside
- * `request` (which assumes JSON) but mirrors its one-shot 401 refresh.
+ * API 43 — GET /reports/{jobId}/download. Returns the Blob + filename (from
+ * Content-Disposition). Bypasses `request` (JSON-only) but mirrors its 401 refresh.
  */
 export async function apiDownloadReport(
   jobId: string,

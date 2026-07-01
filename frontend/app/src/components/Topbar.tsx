@@ -4,16 +4,14 @@ import { PAGE_TITLES, ROLE_COLOR } from '../lib/role';
 import { apiGetIntegrationsHealth, apiRefreshWeather, ApiError } from '../lib/api';
 import type { Role } from '../types';
 
-// Nhãn hiển thị gọn cho từng vai trò trên Topbar.
 const ROLE_CHIP_LABEL: Record<Role, string> = {
   viewer: 'Viewer',
   operator: 'Operator',
   admin: 'Admin',
 };
 
-// Primary data sources (per product decision): Open-Meteo for forecast, GDACS
-// for disaster events. The other 3 (OWM, WeatherAPI, EONET) are fallback, so the
-// Topbar health chip reflects ONLY these — fallback being down is fine.
+// Primary sources: Open-Meteo (forecast) + GDACS (events). The chip reflects only
+// these — the fallback sources being down is non-fatal.
 const PRIMARY_SOURCES = ['OpenMeteo', 'GDACS'];
 const HEALTH_POLL_MS = 60_000;
 
@@ -31,10 +29,8 @@ export default function Topbar() {
 
   const [title, subtitle] = PAGE_TITLES[route];
 
-  // Group F — poll API 35 (Admin-only endpoint) and reduce it to the health of
-  // the primary sources only. Runs only for admins (the chip is admin-gated too),
-  // so non-admins never hit the 403. setState happens only in async callbacks to
-  // avoid the synchronous-setState-in-effect pitfall.
+  // Poll API 35 (admins only, so non-admins never hit the 403) and reduce it to the
+  // primary sources' health.
   const [chipState, setChipState] = useState<ChipState>('unknown');
   useEffect(() => {
     if (role !== 'admin') return;
@@ -59,12 +55,11 @@ export default function Topbar() {
     };
   }, [role]);
 
-  // Group F — API 31 manual weather refresh. Admin-only on the UI (see the
-  // gated block below); the server also enforces Operator/Admin + a debounce
-  // lock (429 when a refresh is already in flight).
+  // API 31 manual weather refresh. Admin-gated in the UI; the server also enforces
+  // Operator/Admin + a debounce lock (429 if already in flight).
   const onSync = async () => {
     if (syncing) return;
-    doSync(); // spinner visual (auto-clears)
+    doSync(); // spinner (auto-clears)
     try {
       const { jobId } = await apiRefreshWeather();
       showToast(`Đã kích hoạt đồng bộ thời tiết · job ${jobId.slice(0, 8)}`);

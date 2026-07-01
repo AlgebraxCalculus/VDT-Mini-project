@@ -1,39 +1,22 @@
 import { WeatherSource } from '../entities/weather-snapshot.entity';
 import { ForecastResult, ForecastTarget } from '../types/normalized-forecast';
 
-/**
- * Anything the healthcheck monitor (API 35) can probe. All four external
- * sources implement this; only the three forecast sources also implement
- * {@link ForecastProvider}.
- */
+/** Anything the healthcheck monitor (API 35) can probe. */
 export interface HealthCheckable {
   readonly code: WeatherSource;
-  /** Does this source require an API key to be usable? */
   readonly requiresKey: boolean;
-  /** Usable now? (keyless, or its key is configured). */
+  /** Usable now (keyless, or key configured). */
   isConfigured(): boolean;
-  /**
-   * Lightweight liveness probe. Resolves with latency ms; throws on failure.
-   * `timeoutMs` lets the healthcheck use a shorter budget than data fetches so a
-   * blocked/unreachable source doesn't stall the whole check.
-   */
+  /** Liveness probe; resolves latency ms, throws on failure. */
   ping(timeoutMs?: number): Promise<number>;
 }
 
-/**
- * A source that returns a 5–7 day weather time-series. Ordered into the fallback
- * chain Open-Meteo → MET Norway → WeatherAPI. `fetchForecast` throws on failure so
- * the ingestion flow falls through to the next configured provider.
- */
+/** A 5–7 day forecast source (chain Open-Meteo → MET Norway → WeatherAPI); throws to fall through. */
 export interface ForecastProvider extends HealthCheckable {
   fetchForecast(targets: ForecastTarget[], days: number): Promise<ForecastResult>;
 }
 
-/**
- * A disaster-event source. Ordered into the fallback chain GDACS → ReliefWeb →
- * EONET. `fetchEvents` throws on failure so the disaster-ingest flow falls through
- * to the next configured source. The raw payload is stored on the snapshot.
- */
+/** A disaster-event source (chain GDACS → ReliefWeb → EONET); throws to fall through. */
 export interface DisasterProvider extends HealthCheckable {
   fetchEvents(): Promise<unknown>;
 }

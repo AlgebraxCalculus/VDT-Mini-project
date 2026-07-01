@@ -1,10 +1,7 @@
-// Presentation helpers for risk/flood display — labels, colours, legends and
-// threshold lookups shared across the views. These are pure UI utilities (no
-// mock data); they used to live alongside the mock fixtures in data/mockData.ts.
+// Presentation helpers for risk/flood display — labels, colours, legends, threshold lookups.
 import type { RiskStatus, Threshold } from '../types';
 
-// All risk scores are on the backend 0–100 scale (station_risk_assessments.
-// risk_score). Band boundaries mirror the engine's classifier: 30 / 60 / 80.
+// Risk scores are on the backend 0–100 scale; bands mirror the engine's classifier.
 export function band(r: number): [string, string] {
   if (r < 10) return ['Thấp', '#94A3B8'];
   if (r < 30) return ['Chú ý', '#16A34A'];
@@ -27,11 +24,7 @@ export const riskMeta = (rs: RiskStatus | null) => RISK_META[rs ?? 'NORMAL'];
 export const thresholdAt = (thresholds: Threshold[], level: 1 | 2 | 3): number | null =>
   thresholds.find((t) => t.alertLevel === level)?.thresholdValue ?? null;
 
-/**
- * Map a 0–100 flood-risk score to its legend band (colour + label) — mirrors the
- * "Chỉ số rủi ro lũ" bands in FLOOD_LEGEND (<10 Thấp, 10–30 Chú ý, 30–60 Trung
- * bình, 60–80 Cao, ≥80 Rất cao). Used to colour the map dots by score.
- */
+/** Map a 0–100 flood-risk score to its legend band (colour + label); see FLOOD_LEGEND. */
 export function floodLevel(score: number): { color: string; label: string } {
   if (score >= 80) return { color: '#EE0033', label: 'Rất cao' };
   if (score >= 60) return { color: '#F97316', label: 'Cao' };

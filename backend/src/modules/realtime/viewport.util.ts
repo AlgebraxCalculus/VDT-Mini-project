@@ -1,26 +1,16 @@
 /**
- * Viewport ↔ room mapping (tile-based), per the design's "subscribe viewport room
- * (tile-based)". Clients subscribe to the slippy-map tiles their bounding box
- * covers at a fixed index zoom; a station's risk delta maps to exactly one tile,
- * so the gateway can route it to the right room(s) without a spatial query.
+ * Tile-based viewport ↔ room mapping. Clients subscribe to the slippy-map tiles
+ * their bbox covers at a fixed index zoom; a station's delta maps to exactly one
+ * tile, so the gateway routes without a spatial query.
  */
 
-/**
- * Fixed indexing zoom for room granularity. Independent of the client's actual
- * map zoom. z=7 ≈ ~310 km tiles at the equator — coarse enough that a typical
- * viewport spans only a handful of rooms, fine enough to keep per-room fan-out
- * small for Vietnam's extent.
- */
+/** Fixed room-granularity zoom (~310 km tiles), independent of the client's map zoom. */
 export const VIEWPORT_INDEX_ZOOM = 7;
 
-/**
- * Safety cap on rooms joined per subscribe. A viewport this wide is zoomed out
- * past the point where per-station deltas are useful; we clamp instead of letting
- * a client join thousands of rooms.
- */
+/** Safety cap on rooms joined per subscribe (a wider viewport is clamped). */
 export const MAX_ROOMS_PER_SUBSCRIBE = 256;
 
-/** Room prefix so the gateway can find/leave all viewport rooms on a socket. */
+/** Room prefix so the gateway can find/leave a socket's viewport rooms. */
 export const VIEWPORT_ROOM_PREFIX = 'vp:';
 
 export interface Bbox {
@@ -57,9 +47,8 @@ export function stationRoom(
 }
 
 /**
- * All rooms a bounding box covers at the index zoom. Result is clamped to
- * {@link MAX_ROOMS_PER_SUBSCRIBE}; `clamped` flags when the viewport was too wide
- * and the tile set was truncated.
+ * All rooms a bbox covers at the index zoom, clamped to {@link MAX_ROOMS_PER_SUBSCRIBE};
+ * `clamped` flags a truncated tile set.
  */
 export function bboxToRooms(
   bbox: Bbox,
@@ -87,9 +76,8 @@ export function bboxToRooms(
 }
 
 /**
- * Validate + normalize a raw subscribe payload into a Bbox. Accepts either
- * `{ bbox: [minLng, minLat, maxLng, maxLat] }` or
- * `{ bbox: { minLng, minLat, maxLng, maxLat } }`. Returns null if invalid.
+ * Validate + normalize a subscribe payload into a Bbox, accepting a `[minLng, minLat,
+ * maxLng, maxLat]` array or object form. Null if invalid.
  */
 export function parseBbox(input: unknown): Bbox | null {
   if (!input || typeof input !== 'object') return null;

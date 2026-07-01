@@ -18,7 +18,7 @@ import { EventBusService } from '../../event-bus/event-bus.service';
 import { EVENT_CHANNELS } from '../../event-bus/event-bus.constants';
 import { ProvinceResolverService } from '../provinces/province-resolver.service';
 
-/** Station detail returned to clients: the row + province + threshold tiers. */
+/** Station row + province + threshold tiers. */
 export type StationWithThresholds = Station & { thresholds: FloodThreshold[] };
 
 export interface PaginatedStations {
@@ -37,30 +37,21 @@ export class StationsService {
     private readonly stationsRepo: Repository<Station>,
     @InjectRepository(FloodThreshold)
     private readonly thresholdsRepo: Repository<FloodThreshold>,
-    // Used for transactions + the raw PostGIS statements (ST_MakePoint/ST_Contains).
+    // Transactions + raw PostGIS statements (ST_MakePoint/ST_Contains).
     private readonly dataSource: DataSource,
     private readonly eventBus: EventBusService,
-    // Falls back to reverse-geocoding (and auto-creating a province) when a
-    // coordinate lands outside every existing province boundary.
+    // Reverse-geocodes (and auto-creates a province) when a coord lands outside
+    // every existing province boundary.
     private readonly provinceResolver: ProvinceResolverService,
   ) {}
 
-  // ----------------------------------------------------------------------------
-  // API 14 — POST /stations (the PostGIS create).
-  // ----------------------------------------------------------------------------
+  // --- API 14 — POST /stations ---
 
   /**
-   * Create a station and auto-assign its province by point-in-polygon.
-   *
-   * geom and province_id are set in a single raw statement *after* the insert so
-   * that:
-   *   - geom always gets SRID 4326 via ST_SetSRID(ST_MakePoint(lng, lat), 4326)
-   *     — inserting a bare GeoJSON object can leave SRID 0 and break later
-   *     ST_Contains / ST_MakeEnvelope viewport queries;
-   *   - province_id is derived with ST_Contains(province.boundary, point) and is
-   *     never set by hand. A station outside every boundary keeps province_id NULL.
-   * The insert + geom update + thresholds run in one transaction so a partial
-   * row can never be observed.
+   * Create a station, auto-assigning province by point-in-polygon. geom + province_id
+   * are set in one raw statement after the insert so geom keeps SRID 4326 (a bare
+   * GeoJSON insert can leave SRID 0 and break viewport queries) and province_id comes
+   * only from ST_Contains (NULL if outside all boundaries). All in one transaction.
    */
   async create(dto: CreateStationDto): Promise<StationWithThresholds> {
     await this.assertCodeAvailable(dto.stationCode);
@@ -92,20 +83,17 @@ export class StationsService {
       return id;
     });
 
-    // applyGeometry assigns province via ST_Contains; if the point is outside
-    // every existing province, geocode it and auto-create one (kept out of the
-    // transaction above so the network call doesn't hold a DB lock).
+    // ST_Contains missed → geocode + auto-create a province. Outside the txn so
+    // the network call doesn't hold a DB lock.
     await this.ensureProvince(stationId, dto.longitude, dto.latitude);
 
-    // Seeding thresholds feeds the risk inputs → notify the Risk Engine.
+    // Thresholds feed the risk inputs → notify the Risk Engine.
     if (dto.thresholds?.length) this.emitThresholdChanged(stationId);
 
     return this.findOne(stationId);
   }
 
-  // ----------------------------------------------------------------------------
-  // API 12 / 13 — read.
-  // ----------------------------------------------------------------------------
+  // --- API 12 / 13 — read ---
 
   /** GET /stations — filter by province/risk/event + free text, paginated. */
   async findAll(query: QueryStationsDto): Promise<PaginatedStations> {
@@ -113,13 +101,9 @@ export class StationsService {
 
     const qb = this.stationsRepo
       .createQueryBuilder('station')
-      // Province is always joined: it supplies the province name in the response
-      // AND backs the free-text search below. The heavy boundary/centroid
-      // geometry is kept out of the payload via `select: false` on the entity
-      // (so this stays light even at 10k+ rows); station.geom is excluded the
-      // same way.
+      // Province supplies the response name and backs the free-text search; its
+      // heavy geometry stays out of the payload via `select: false` (as does geom).
       .leftJoinAndSelect('station.province', 'province')
-      // Soft-deleted stations are excluded everywhere they're read.
       .where('station.isDeleted = false')
       .orderBy('station.createdAt', 'DESC')
       .skip((page - 1) * size)
@@ -132,7 +116,7 @@ export class StationsService {
       qb.andWhere('station.riskStatus = :riskStatus', { riskStatus });
     }
     if (eventId) {
-      // Restrict to stations frozen into an event's scope (event_stations N-N).
+      // Restrict to stations frozen into an event's scope.
       qb.innerJoin(
         'event_stations',
         'es',
@@ -141,14 +125,8 @@ export class StationsService {
       );
     }
     if (q) {
-      // Free-text search spans three fields, in order of real-world frequency:
-      //   1. station name      — "Trạm Đông Hà" → that station
-      //   2. province name     — "Quảng Trị"    → every station in the province
-      //   3. station code      — kept for completeness, used far less often
-      // ILIKE is case-insensitive but accent-sensitive; typing with Vietnamese
-      // diacritics matches as expected (see notes on `unaccent` for diacritic-
-      // insensitive search later). province.name is available because the
-      // province relation is always joined below.
+      // Search station name, province name, then code. ILIKE is case-insensitive
+      // but accent-sensitive (diacritics must match).
       const term = `%${q}%`;
       qb.andWhere(
         new Brackets((w) => {
@@ -165,16 +143,10 @@ export class StationsService {
   }
 
   /**
-   * GET /stations/viewport — stations whose point falls inside the map BBOX.
-   *
-   * `ST_Contains(ST_MakeEnvelope(minLng,minLat,maxLng,maxLat,4326), geom)` is
-   * served by the GIST index on station.geom (PostGIS uses the index's bbox
-   * `&&` pre-filter before the exact containment test), so this stays fast at
-   * 10k+ stations while only returning what's on screen. Lighter than findAll's
-   * pagination for the map: province is joined for the marker popup, but
-   * thresholds are NOT attached (the map doesn't render tiers). Soft-deleted and
-   * geom-less rows are excluded. Rows are risk-ordered (DANGER→WATCH→NORMAL) so
-   * if the result hits `limit` the most important stations survive truncation.
+   * GET /stations/viewport — stations inside the map BBOX. The ST_Contains over
+   * ST_MakeEnvelope rides the GIST index's bbox pre-filter, staying fast at 10k+
+   * stations. Province is joined for the popup; thresholds aren't. Risk-ordered
+   * (DANGER→NORMAL) so the most important rows survive `limit` truncation.
    */
   async findInViewport(dto: ViewportStationsDto): Promise<Station[]> {
     const { minLng, minLat, maxLng, maxLat, riskStatus, limit } = dto;
@@ -182,11 +154,8 @@ export class StationsService {
     const qb = this.stationsRepo
       .createQueryBuilder('station')
       .leftJoinAndSelect('station.province', 'province')
-      // Rank as a selected expression with its own alias. We can't pass this raw
-      // CASE straight to .orderBy(): TypeORM runs the order-by string through its
-      // `alias.column` resolver, mis-parses "CASE station.risk_status" as an alias
-      // named "CASE station", and throws. Ordering by the bare alias below avoids
-      // the resolver entirely (no dot to trip on).
+      // Rank via a selected alias — passing this raw CASE to .orderBy() makes
+      // TypeORM's alias resolver mis-parse "CASE station.risk_status" and throw.
       .addSelect(
         `CASE station.risk_status
             WHEN 'DANGER' THEN 3
@@ -211,11 +180,7 @@ export class StationsService {
     return qb.getMany();
   }
 
-  /**
-   * Attach threshold tiers to a page of stations in a single batched query
-   * (keyed by station_id) — avoids an N+1 while keeping the list payload self-
-   * contained. Stations with no tiers get an empty array.
-   */
+  /** Attach threshold tiers in one batched query (avoids N+1); no tiers → []. */
   private async attachThresholds(
     stations: Station[],
   ): Promise<StationWithThresholds[]> {
@@ -251,15 +216,12 @@ export class StationsService {
     return Object.assign(station, { thresholds });
   }
 
-  // ----------------------------------------------------------------------------
-  // API 15 — PUT /stations/{id}.
-  // ----------------------------------------------------------------------------
+  // --- API 15 — PUT /stations/{id} ---
 
   /**
-   * Update mutable fields. If the coordinates move, geom + province_id are
-   * recomputed via the same PostGIS statement as create(). We never write geom
-   * through TypeORM's entity save (which would round-trip GeoJSON and risk
-   * dropping the SRID) — only via the raw ST_SetSRID statement.
+   * Update mutable fields. If coords move, geom + province_id are recomputed via
+   * the same raw ST_SetSRID statement as create() — never through entity save,
+   * which would round-trip GeoJSON and risk dropping the SRID.
    */
   async update(id: number, dto: UpdateStationDto): Promise<StationWithThresholds> {
     await this.assertExists(id);
@@ -288,7 +250,6 @@ export class StationsService {
       }
     });
 
-    // Re-resolve the province (geocode + auto-create on miss) when coords moved.
     if (latProvided && lngProvided) {
       await this.ensureProvince(id, dto.longitude!, dto.latitude!);
     }
@@ -296,11 +257,9 @@ export class StationsService {
     return this.findOne(id);
   }
 
-  // ----------------------------------------------------------------------------
-  // API 16 — DELETE /stations/{id} (soft-delete).
-  // ----------------------------------------------------------------------------
+  // --- API 16 — DELETE /stations/{id} (soft-delete) ---
 
-  /** Soft-delete: flip is_deleted / deleted_at to preserve report history. */
+  /** Soft-delete to preserve report history. */
   async remove(id: number): Promise<void> {
     await this.assertExists(id);
     await this.stationsRepo.update(id, {
@@ -309,15 +268,9 @@ export class StationsService {
     });
   }
 
-  // ----------------------------------------------------------------------------
-  // API 17 — PUT /stations/{id}/thresholds.
-  // ----------------------------------------------------------------------------
+  // --- API 17 — PUT /stations/{id}/thresholds ---
 
-  /**
-   * Replace the station's threshold tiers and re-trigger risk computation.
-   * (Replace-current strategy; the schema also supports versioning by
-   * effective_from if append-only history is needed later.)
-   */
+  /** Replace the station's threshold tiers and re-trigger risk computation. */
   async setThresholds(
     id: number,
     dto: SetThresholdsDto,
@@ -347,14 +300,11 @@ export class StationsService {
     });
   }
 
-  // ----------------------------------------------------------------------------
-  // Internals.
-  // ----------------------------------------------------------------------------
+  // --- Internals ---
 
   /**
-   * Set geom (SRID 4326) and auto-assign province_id by point-in-polygon.
-   * Runs on the supplied transaction manager. lng/lat order matches
-   * ST_MakePoint(x, y) = (longitude, latitude).
+   * Set geom (SRID 4326) and auto-assign province_id by point-in-polygon on the
+   * supplied transaction manager. ST_MakePoint(x, y) = (longitude, latitude).
    */
   private applyGeometry(
     manager: { query: (sql: string, params: unknown[]) => Promise<unknown> },
@@ -378,10 +328,9 @@ export class StationsService {
   }
 
   /**
-   * Ensure the station has a province. applyGeometry already tried the spatial
-   * fast-path (ST_Contains over existing boundaries); only when that left
-   * province_id NULL do we pay for a reverse-geocode that resolves — and if
-   * needed creates — the province. Runs outside any transaction.
+   * Ensure the station has a province. Only when applyGeometry's ST_Contains left
+   * province_id NULL do we pay for a reverse-geocode that resolves (and creates if
+   * needed) the province. Runs outside any transaction.
    */
   private async ensureProvince(
     stationId: number,
@@ -433,10 +382,8 @@ export class StationsService {
   }
 
   /**
-   * Event-driven hook (design): a threshold change publishes onto the internal
-   * Redis event bus. The Risk Engine (future) subscribes, recomputes, and emits
-   * a RISK_DELTA the gateway forwards to clients. Fire-and-forget: a publish
-   * failure must not fail the station mutation that triggered it.
+   * Publish a threshold change to the event bus for the Risk Engine. Fire-and-forget:
+   * a publish failure must not fail the station mutation that triggered it.
    */
   private emitThresholdChanged(stationId: number): void {
     void this.eventBus

@@ -1,6 +1,5 @@
-// Shared helpers for Group H report export (APIs 40–43): create → poll → deliver.
-// Used by StationsView (station-inventory) and ForecastView (risk-summary) so the
-// create/poll/download/print plumbing lives in one place.
+// Shared Group H report export (APIs 40–43): create → poll → deliver, used by
+// StationsView and ForecastView.
 
 import { ApiError, apiCreateReport, apiDownloadReport, apiGetReportJob } from './api';
 import type { CreateReportPayload, ReportMeta } from './api';
@@ -49,11 +48,9 @@ export function printHtmlBlob(blob: Blob): void {
 export type ReportDelivery = 'download' | 'print';
 
 /**
- * Create a report (API 40), poll until ready (API 42), download it (API 43), and
- * deliver it: `download` saves the file, `print` opens the HTML and prints (→ PDF).
- * `filenameOverride` lets a caller save under a different name/extension — e.g.
- * delivering the HTML report as a `.doc` for a "Word" export (Word opens HTML).
- * Returns the report metadata so the caller can show a result toast.
+ * Create (API 40) → poll (API 42) → download (API 43) a report, then deliver it:
+ * `download` saves the file, `print` prints the HTML (→ PDF). `filenameOverride`
+ * lets a caller save under a different name/ext (e.g. HTML as `.doc` for "Word").
  */
 export async function exportReport(
   payload: CreateReportPayload,

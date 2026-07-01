@@ -3,11 +3,7 @@ import { Roles } from '../auth/decorators/roles.decorator';
 import { RoleCode } from '../users/entities/role.entity';
 import { HealthMonitorService } from './health-monitor.service';
 
-/**
- * API 35 — external-source healthcheck. Admin-only per the RBAC matrix. Reads
- * the last cached ping result (latency / error rate / status) straight from
- * Redis, written by the healthcheck cron.
- */
+/** API 35 — external-source healthcheck (Admin-only), reading cached ping results from Redis. */
 @Controller('integrations')
 export class IntegrationsController {
   constructor(private readonly healthMonitor: HealthMonitorService) {}
@@ -20,11 +16,8 @@ export class IntegrationsController {
   }
 
   /**
-   * POST /integrations/health/refresh — probe every source *now* (re-reading each
-   * provider's current `isConfigured()`), then return the fresh results. Lets an
-   * admin re-check on demand instead of waiting for the 5-minute cron — e.g. right
-   * after adding a provider key/appname. 200 (not 201): it returns state, not a
-   * created resource.
+   * POST /integrations/health/refresh — probe every source now and return fresh
+   * results (on-demand re-check without waiting for the cron). 200: returns state, not a resource.
    */
   @Roles(RoleCode.ADMIN)
   @Post('health/refresh')

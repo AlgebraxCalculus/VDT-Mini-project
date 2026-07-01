@@ -1,17 +1,10 @@
 /**
- * GDACS events4app → normalized disaster events.
- *
- * The feed is a GeoJSON FeatureCollection of *currently active* global hazards.
- * We keep only the two hazard types this flood/storm system models (TC→STORM,
- * FL→FLOOD) and reduce each feature to the minimum the ingestion service needs:
- * a stable external id, a code, a name, and an "affected geometry" used both to
- * decide VN-relevance (spatial intersect with provinces) and to freeze scope.
- *
- * Parsing is deliberately defensive — the payload may arrive via a read-proxy
- * (allorigins) and field presence/casing varies across GDACS hazard types.
+ * GDACS events4app (a GeoJSON FeatureCollection of active global hazards) →
+ * normalized disaster events. Keeps only TC→STORM and FL→FLOOD. Defensive parsing:
+ * the payload may arrive via a read-proxy and field casing varies across hazards.
  */
 
-/** How the affected area is expressed for the spatial queries downstream. */
+/** How the affected area is expressed for downstream spatial queries. */
 export type AffectedGeom =
   | { kind: 'point'; lon: number; lat: number; radiusDeg: number }
   | { kind: 'bbox'; minX: number; minY: number; maxX: number; maxY: number }
@@ -20,27 +13,25 @@ export type AffectedGeom =
 export interface NormalizedDisaster {
   /** GDACS event id, e.g. "1000810". */
   externalId: string;
-  /** Domain disaster_type code we map onto. */
   typeCode: 'STORM' | 'FLOOD';
-  /** Human label for the disaster_type (seeded if missing). */
+  /** disaster_type label (seeded if missing). */
   typeName: string;
-  /** Globally-unique, dedupe key + event_code column, e.g. "GDACS-TC1000810". */
+  /** Dedupe key + event_code column, e.g. "GDACS-TC1000810". */
   eventCode: string;
-  /** Event display name (≤255). */
+  /** Display name (≤255). */
   name: string;
-  /** GDACS alert level (Green/Orange/Red) if present — used in the description. */
+  /** GDACS alert level (Green/Orange/Red) if present. */
   alertLevel: string | null;
-  /** First-seen start time. */
   startTime: Date;
-  /** Geometry used for VN filtering + scope assignment. */
+  /** Geometry for VN filtering + scope assignment. */
   geom: AffectedGeom;
 }
 
-/** Per-hazard buffer radii (degrees) when only a point is available. */
+/** Per-hazard buffer radii (degrees) for point-only hazards. */
 export interface RadiusConfig {
   storm: number;
   flood: number;
-  /** Multipliers applied on top of the per-type radius, by alert level. */
+  /** Per-alert-level multipliers on the base radius. */
   alertMultiplier: { red: number; orange: number; green: number };
 }
 
@@ -56,7 +47,7 @@ const TYPE_MAP: Record<string, { code: 'STORM' | 'FLOOD'; name: string }> = {
   FL: { code: 'FLOOD', name: 'Lũ lụt' },
 };
 
-/** Largest bbox span (deg) we accept before falling back to a point buffer — guards against a global-track bbox scoping the whole map. */
+/** Max bbox span (deg) before falling back to a point buffer — guards against a global-track bbox scoping the whole map. */
 const MAX_BBOX_SPAN_DEG = 25;
 
 interface RawFeature {
@@ -77,13 +68,13 @@ export function parseGdacsEvents(
     const props = f.properties ?? {};
     const eventType = String(str(props, 'eventtype') ?? '').toUpperCase();
     const mapped = TYPE_MAP[eventType];
-    if (!mapped) continue; // not a hazard we model
+    if (!mapped) continue;
 
     const externalId = str(props, 'eventid', 'eventId', 'id');
     if (!externalId) continue;
 
     const geom = pickGeometry(f, mapped.code, str(props, 'alertlevel'), radii);
-    if (!geom) continue; // no usable location → can't scope it
+    if (!geom) continue; // no usable location → can't scope
 
     const alertLevel = str(props, 'alertlevel', 'episodealertlevel') ?? null;
     const rawName =
@@ -105,9 +96,7 @@ export function parseGdacsEvents(
   return out;
 }
 
-// ---------------------------------------------------------------------------
-// Internals
-// ---------------------------------------------------------------------------
+// --- Internals ---
 
 function extractFeatures(raw: unknown): RawFeature[] {
   if (!raw || typeof raw !== 'object') return [];
@@ -115,10 +104,7 @@ function extractFeatures(raw: unknown): RawFeature[] {
   return Array.isArray(obj.features) ? (obj.features as RawFeature[]) : [];
 }
 
-/**
- * Choose the affected geometry, preferring the most informative usable shape:
- * an explicit polygon → a sane bbox → a type/alert-sized buffer around the point.
- */
+/** Pick the most informative usable geometry: polygon → sane bbox → point buffer. */
 function pickGeometry(
   f: RawFeature,
   typeCode: 'STORM' | 'FLOOD',
@@ -128,7 +114,7 @@ function pickGeometry(
   const g = f.geometry;
   const gType = g?.type?.toLowerCase();
 
-  // 1. An explicit polygon footprint — best fidelity.
+  // Explicit polygon footprint — best fidelity.
   if ((gType === 'polygon' || gType === 'multipolygon') && g) {
     try {
       return { kind: 'geojson', geojson: JSON.stringify(g) };
@@ -137,21 +123,16 @@ function pickGeometry(
     }
   }
 
-  // 2. A non-degenerate, not-absurdly-large bbox.
   const bbox = asBbox(f.bbox);
   if (bbox) return bbox;
 
-  // 3. A point + a buffer sized by hazard type and alert level.
   const pt = asPoint(g?.coordinates);
   if (pt) return pointToGeom(pt.lon, pt.lat, typeCode, alertLevel, radii);
 
   return null;
 }
 
-/**
- * A point footprint buffered by hazard type and alert level. Shared with the EONET
- * parser so both size point-only hazards the same way.
- */
+/** A point buffered by hazard type and alert level. Shared with the EONET parser. */
 export function pointToGeom(
   lon: number,
   lat: number,
@@ -209,7 +190,7 @@ function str(
   return undefined;
 }
 
-/** Parse a date string, defaulting to now on missing/invalid input. Shared with the other source parsers. */
+/** Parse a date string, defaulting to now on missing/invalid input. */
 export function parseDate(value: string | undefined): Date {
   if (!value) return new Date();
   const d = new Date(value);

@@ -10,12 +10,8 @@ import { EventsService } from './events.service';
 
 /**
  * Group D — Disaster events. Reads open to any authenticated user; update/close
- * require Operator/Admin. Event ids are BIGINT, so they're handled as strings
- * (no ParseIntPipe).
- *
- * Note: there is no manual create route (API 22 removed). Events are tracked
- * automatically from the third-party disaster chain (GDACS → ReliefWeb → EONET)
- * by {@link EventIngestionService} — see the internal ingest endpoint.
+ * require Operator/Admin. Ids are BIGINT, handled as strings. No manual create
+ * (API 22 removed) — events are auto-tracked by {@link EventIngestionService}.
  */
 @Controller('events')
 export class EventsController {
@@ -47,10 +43,7 @@ export class EventsController {
     return this.eventsService.close(id, dto);
   }
 
-  /**
-   * API 25 — POST /events/{id}/impact. Manually (re)assign affected scope
-   * (provinces and/or a GeoJSON footprint); replaces the auto-assigned scope.
-   */
+  /** API 25 — POST /events/{id}/impact. (Re)assign scope, replacing the auto-assigned one. */
   @Roles(RoleCode.OPERATOR, RoleCode.ADMIN)
   @Post(':id/impact')
   assignImpact(@Param('id') id: string, @Body() dto: AssignImpactDto) {

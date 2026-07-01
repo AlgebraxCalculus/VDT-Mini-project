@@ -17,7 +17,7 @@ import { UpdateUserDto } from './dto/update-user.dto';
 import { Role, RoleCode } from './entities/role.entity';
 import { User } from './entities/user.entity';
 
-/** User row with the password hash stripped — the only shape we return to clients. */
+/** User row with the password hash stripped — the only shape returned to clients. */
 export type PublicUser = Omit<User, 'passwordHash'>;
 
 export interface PaginatedUsers {
@@ -32,7 +32,6 @@ export class UsersService {
   private readonly saltRounds: number;
 
   constructor(
-    // Repository layer: TypeORM repositories are injected, never used from the controller.
     @InjectRepository(User)
     private readonly usersRepo: Repository<User>,
     @InjectRepository(Role)
@@ -46,9 +45,7 @@ export class UsersService {
     );
   }
 
-  // ----------------------------------------------------------------------------
-  // Internal helpers used by AuthService (these intentionally keep the hash).
-  // ----------------------------------------------------------------------------
+  // --- Internal helpers for AuthService (these keep the hash) ---
 
   /** Load a user (with role + passwordHash) for credential verification. */
   findByUsernameWithSecret(username: string): Promise<User | null> {
@@ -71,9 +68,7 @@ export class UsersService {
     await this.usersRepo.update(id, { lastLoginAt: new Date() });
   }
 
-  // ----------------------------------------------------------------------------
-  // Group B — Account management (Admin).
-  // ----------------------------------------------------------------------------
+  // --- Group B — Account management (Admin) ---
 
   /** GET /users — filter by role/text, paginated. */
   async findAll(query: QueryUsersDto): Promise<PaginatedUsers> {
@@ -91,7 +86,7 @@ export class UsersService {
     }
 
     if (q) {
-      // Case-insensitive search across the human-readable identity fields.
+      // Case-insensitive search across username/email/fullName.
       qb.andWhere(
         new Brackets((w) => {
           w.where('user.username ILIKE :q', { q: `%${q}%` })
@@ -119,11 +114,11 @@ export class UsersService {
     return this.toPublic(user);
   }
 
-  /** POST /users — auto-hash the password (Bcrypt). */
+  /** POST /users — bcrypt-hash the password. */
   async create(dto: CreateUserDto): Promise<PublicUser> {
     await this.assertRoleExists(dto.roleId);
 
-    // Enforce the UNIQUE(username)/UNIQUE(email) constraints up front for a clean 409.
+    // Pre-check username/email uniqueness for a clean 409.
     const clash = await this.usersRepo.findOne({
       where: [{ username: dto.username }, { email: dto.email }],
     });
@@ -143,14 +138,12 @@ export class UsersService {
     });
 
     const saved = await this.usersRepo.save(user);
-    // Re-read with the role relation so the response carries role details.
     return this.findOne(saved.id);
   }
 
   /**
-   * PATCH /users/{id}. Carries the two protective business rules:
-   *   - a user cannot change their own role (self-demotion guard);
-   *   - cannot deactivate / demote the last remaining ADMIN.
+   * PATCH /users/{id}. Business rules: no self role-change, and the last active
+   * ADMIN can't be demoted or deactivated.
    */
   async update(
     id: number,
@@ -166,7 +159,7 @@ export class UsersService {
     const roleChanged = dto.roleId !== undefined && dto.roleId !== user.roleId;
     const deactivating = dto.isActive === false && user.isActive;
 
-    // Rule 1: block self-demotion (and self-lockout) regardless of target role.
+    // No self role-change or self-deactivation.
     if (isSelf && roleChanged) {
       throw new ForbiddenException('You cannot change your own role');
     }
@@ -174,7 +167,7 @@ export class UsersService {
       throw new ForbiddenException('You cannot deactivate your own account');
     }
 
-    // Rule 2: protect the last admin from being demoted or deactivated.
+    // Protect the last admin from demotion or deactivation.
     if (this.isAdmin(user) && (deactivating || (roleChanged && dto.roleId))) {
       if (roleChanged && dto.roleId) {
         const target = await this.rolesRepo.findOne({
@@ -189,7 +182,6 @@ export class UsersService {
       }
     }
 
-    // Apply changes.
     if (dto.email !== undefined) user.email = dto.email;
     if (dto.fullName !== undefined) user.fullName = dto.fullName;
     if (dto.isActive !== undefined) user.isActive = dto.isActive;
@@ -204,14 +196,13 @@ export class UsersService {
     try {
       await this.usersRepo.save(user);
     } catch (err) {
-      // Unique violation on email (Postgres error code 23505).
       if ((err as { code?: string }).code === '23505') {
         throw new ConflictException('email already in use');
       }
       throw err;
     }
 
-    // Permission/role change must invalidate the user's live tokens immediately.
+    // A role change must invalidate the user's live tokens.
     if (roleChanged) {
       await this.tokenStore.invalidateUser(id);
     }
@@ -219,10 +210,7 @@ export class UsersService {
     return this.findOne(id);
   }
 
-  /**
-   * PUT /users/{id}/role. Dedicated role-assignment endpoint. Same guards as
-   * update() plus mandatory token invalidation.
-   */
+  /** PUT /users/{id}/role — same guards as update() plus mandatory token invalidation. */
   async changeRole(
     id: number,
     roleId: number,
@@ -242,7 +230,6 @@ export class UsersService {
       throw new BadRequestException('Target role does not exist');
     }
 
-    // Demoting the last admin away from ADMIN is forbidden.
     if (this.isAdmin(user) && target.code !== RoleCode.ADMIN) {
       await this.assertNotLastAdmin(id);
     }
@@ -250,7 +237,7 @@ export class UsersService {
     if (user.roleId !== roleId) {
       user.roleId = roleId;
       await this.usersRepo.save(user);
-      // Revoke all of the target user's tokens so the new role takes effect now.
+      // Revoke tokens so the new role takes effect now.
       await this.tokenStore.invalidateUser(id);
     }
 
@@ -264,7 +251,6 @@ export class UsersService {
       throw new NotFoundException(`User ${id} not found`);
     }
 
-    // Optional but sensible: don't let an admin delete themselves into lockout.
     if (currentUser.id === id) {
       throw new ForbiddenException('You cannot delete your own account');
     }
@@ -274,7 +260,6 @@ export class UsersService {
     }
 
     await this.usersRepo.delete(id);
-    // Kill any sessions the deleted user still holds.
     await this.tokenStore.invalidateUser(id);
   }
 
@@ -283,9 +268,7 @@ export class UsersService {
     return this.rolesRepo.find({ order: { id: 'ASC' } });
   }
 
-  // ----------------------------------------------------------------------------
-  // Guards / mappers.
-  // ----------------------------------------------------------------------------
+  // --- Guards / mappers ---
 
   private isAdmin(user: User): boolean {
     return user.role?.code === RoleCode.ADMIN;

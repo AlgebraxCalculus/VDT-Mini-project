@@ -22,7 +22,7 @@ import { DisasterType } from './entities/disaster-type.entity';
 import { EventBusService } from '../../event-bus/event-bus.service';
 import { EVENT_CHANNELS } from '../../event-bus/event-bus.constants';
 
-/** Event + scope summary (province/station counts) for list & detail views. */
+/** Event + scope summary (province/station counts). */
 export type EventWithScope = DisasterEvent & {
   provinceCount: number;
   stationCount: number;
@@ -42,7 +42,7 @@ export interface ScopeProvince {
   name: string;
 }
 
-/** One station in an event's scope (client-facing fields only). */
+/** One station in an event's scope. */
 export interface ScopeStation {
   id: number;
   stationCode: string;
@@ -77,17 +77,11 @@ export class EventsService {
     private readonly eventBus: EventBusService,
   ) {}
 
-  // ----------------------------------------------------------------------------
-  // API 22 — POST /events.
-  // ----------------------------------------------------------------------------
+  // --- API 22 — POST /events ---
 
   /**
-   * Create an ONGOING event.
-   *
-   * Duplicate guard: the design forbids two active events of the same type "on
-   * the same scope". Scope isn't assigned until API 25, so at creation the
-   * effective rule is one ONGOING event per disaster_type — re-check per-province
-   * overlap inside the scope-assignment flow once that lands.
+   * Create an ONGOING event. Duplicate guard: one ONGOING event per disaster_type
+   * (scope isn't assigned until API 25, so the "same scope" rule can't apply yet).
    */
   async create(dto: CreateEventDto, userId: number): Promise<EventWithScope> {
     const type = await this.typesRepo.findOne({
@@ -125,7 +119,7 @@ export class EventsService {
     try {
       saved = await this.eventsRepo.save(event);
     } catch (err) {
-      // Extremely unlikely event_code collision (UNIQUE) — regenerate once.
+      // Rare event_code collision — regenerate once.
       if ((err as { code?: string }).code === '23505') {
         event.eventCode = this.buildEventCode(type.code);
         saved = await this.eventsRepo.save(event);
@@ -137,9 +131,7 @@ export class EventsService {
     return this.findOne(saved.id);
   }
 
-  // ----------------------------------------------------------------------------
-  // API 20 / 21 — read.
-  // ----------------------------------------------------------------------------
+  // --- API 20 / 21 — read ---
 
   /** GET /events — by status, paginated, with province/station counts. */
   async findAll(query: QueryEventsDto): Promise<PaginatedEvents> {
@@ -158,7 +150,7 @@ export class EventsService {
 
     const [rows, total] = await qb.getManyAndCount();
 
-    // One grouped query per relation for the whole page — no N+1.
+    // One grouped query per relation for the whole page (no N+1).
     const counts = await this.scopeCounts(rows.map((e) => e.id));
     const data = rows.map((e) => this.withScope(e, counts));
 
@@ -172,11 +164,9 @@ export class EventsService {
     return this.withScope(event, counts);
   }
 
-  // ----------------------------------------------------------------------------
-  // API 23 — PUT /events/{id}.
-  // ----------------------------------------------------------------------------
+  // --- API 23 — PUT /events/{id} ---
 
-  /** Edit descriptive fields. Locked once the event is CLOSED (terminal state). */
+  /** Edit descriptive fields. Locked once CLOSED (terminal state). */
   async update(id: string, dto: UpdateEventDto): Promise<EventWithScope> {
     const event = await this.findEntity(id);
     this.assertEditable(event);
@@ -189,11 +179,9 @@ export class EventsService {
     return this.findOne(id);
   }
 
-  // ----------------------------------------------------------------------------
-  // API 24 — POST /events/{id}/close.
-  // ----------------------------------------------------------------------------
+  // --- API 24 — POST /events/{id}/close ---
 
-  /** Transition ONGOING → CLOSED. Idempotency is rejected (already closed). */
+  /** Transition ONGOING → CLOSED; rejects if already closed. */
   async close(id: string, dto: CloseEventDto): Promise<EventWithScope> {
     const event = await this.findEntity(id);
     if (event.status === EventStatus.CLOSED) {
@@ -204,22 +192,16 @@ export class EventsService {
     event.endTime = dto.endTime ? new Date(dto.endTime) : new Date();
     await this.eventsRepo.save(event);
 
-    // Closing changes what's drawn on the map / scored by the Risk Engine.
     this.emitEventClosed(id);
     return this.findOne(id);
   }
 
-  // ----------------------------------------------------------------------------
-  // API 25 — POST /events/{id}/impact.
-  // ----------------------------------------------------------------------------
+  // --- API 25 — POST /events/{id}/impact ---
 
   /**
-   * Manually (re)assign an event's affected scope. This REPLACES the existing
-   * N-N scope (the auto-ingestion grows it incrementally; an operator override is
-   * authoritative). Accepts a province list, a GeoJSON footprint, or both (the
-   * footprint constrained to those provinces). Writes via raw PostGIS, then
-   * publishes EVENT_SCOPE_ASSIGNED so the Risk Engine recomputes the new stations.
-   * Locked once the event is CLOSED.
+   * (Re)assign an event's scope, REPLACING the auto-ingested one (operator override
+   * is authoritative). Accepts a province list, a GeoJSON footprint, or both. Writes
+   * via raw PostGIS then publishes EVENT_SCOPE_ASSIGNED. Locked once CLOSED.
    */
   async assignImpact(id: string, dto: AssignImpactDto): Promise<EventScope> {
     const event = await this.findEntity(id);
@@ -249,8 +231,7 @@ export class EventsService {
     }
 
     const stationIds = await this.dataSource.transaction(async (m) => {
-      // Replace: clear the old scope first (stations before provinces is fine —
-      // no FK between the two N-N tables).
+      // Clear the old scope first (no FK between the two N-N tables).
       await m.query(`DELETE FROM event_stations WHERE event_id = $1`, [id]);
       await m.query(`DELETE FROM event_provinces WHERE event_id = $1`, [id]);
 
@@ -260,7 +241,7 @@ export class EventsService {
         const stnFilter = hasProvinces ? 'AND s.province_id = ANY($3)' : '';
         const params = hasProvinces ? [id, gj, provinceIds] : [id, gj];
 
-        // Provinces intersecting the footprint (clipped envelope → guaranteed Polygon).
+        // Provinces intersecting the footprint (clipped envelope → single Polygon).
         await m.query(
           `WITH a AS (SELECT ST_SetSRID(ST_GeomFromGeoJSON($2), 4326) AS geom)
            INSERT INTO event_provinces (event_id, province_id, affected_area)
@@ -284,7 +265,7 @@ export class EventsService {
         return added.map((r) => Number(r.station_id));
       }
 
-      // Province-only mode: scope to whole provinces (no footprint polygon stored).
+      // Province-only mode: whole provinces, no footprint polygon.
       await m.query(
         `INSERT INTO event_provinces (event_id, province_id, affected_area)
          SELECT $1, p.id, NULL FROM provinces p WHERE p.id = ANY($2)
@@ -303,20 +284,17 @@ export class EventsService {
     });
 
     this.emitScopeAssigned(id, stationIds);
-    // Return the fresh scope (first page) so the caller can render immediately.
     return this.getStations(id, { page: 1, size: 50 });
   }
 
-  // ----------------------------------------------------------------------------
-  // API 26 — GET /events/{id}/stations.
-  // ----------------------------------------------------------------------------
+  // --- API 26 — GET /events/{id}/stations ---
 
   /** The event's provinces + paginated stations in scope. */
   async getStations(
     id: string,
     query: QueryEventStationsDto,
   ): Promise<EventScope> {
-    await this.findEntity(id); // 404 if missing
+    await this.findEntity(id);
     const { page, size } = query;
 
     const provinces = await this.dataSource.query<ScopeProvince[]>(
@@ -377,9 +355,7 @@ export class EventsService {
     return { provinces, stations: { data, total, page, size } };
   }
 
-  // ----------------------------------------------------------------------------
-  // Internals.
-  // ----------------------------------------------------------------------------
+  // --- Internals ---
 
   private async findEntity(
     id: string,
@@ -401,10 +377,7 @@ export class EventsService {
     }
   }
 
-  /**
-   * Province/station counts for a set of event ids. event_id is BIGINT → keep
-   * keys as strings (matches DisasterEvent.id). Returns an empty map for [].
-   */
+  /** Province/station counts per event id (string keys, matching BIGINT ids). */
   private async scopeCounts(
     eventIds: string[],
   ): Promise<Map<string, { provinces: number; stations: number }>> {
@@ -461,11 +434,7 @@ export class EventsService {
     return `${typeCode}-${ymd}-${rand}`;
   }
 
-  /**
-   * Event-driven hook (design): closing an event publishes onto the internal
-   * Redis event bus so the map/risk layers refresh for its scope. Fire-and-forget
-   * — a publish failure must not undo the state transition that already committed.
-   */
+  /** Publish EVENT_CLOSED so map/risk layers refresh. Fire-and-forget post-commit. */
   private emitEventClosed(eventId: string): void {
     void this.eventBus
       .publish(EVENT_CHANNELS.EVENT_CLOSED, { eventId })
@@ -478,10 +447,7 @@ export class EventsService {
       );
   }
 
-  /**
-   * Scope (re)assigned (API 25) → tell the Risk Engine to recompute the scoped
-   * stations. Fire-and-forget after the DB commit; skipped when scope is empty.
-   */
+  /** Publish EVENT_SCOPE_ASSIGNED for the Risk Engine. Fire-and-forget; skipped if empty. */
   private emitScopeAssigned(eventId: string, stationIds: number[]): void {
     if (stationIds.length === 0) return;
     void this.eventBus

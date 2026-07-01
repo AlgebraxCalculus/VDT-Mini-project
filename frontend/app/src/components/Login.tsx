@@ -12,8 +12,7 @@ export default function Login() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
 
-  // Call the real POST /auth/login, store tokens, then enter the app with the
-  // role the backend assigned (drives the sidebar RBAC gating).
+  // POST /auth/login, store tokens, then enter the app with the backend-assigned role.
   const submit = async (u = username, p = password) => {
     if (loading) return;
     if (!u.trim() || !p) {
@@ -33,9 +32,7 @@ export default function Login() {
       setError(
         err instanceof ApiError
           ? err.status === 401
-            ? // The backend returns 401 for both wrong credentials and a locked
-              // account ('Account is disabled'); only the message distinguishes
-              // them, so branch on it to show the right reason.
+            ? // 401 covers both wrong credentials and a disabled account; the message distinguishes them.
               /disabled/i.test(err.message)
               ? 'Tài khoản đã bị khóa.'
               : 'Sai tên đăng nhập hoặc mật khẩu.'

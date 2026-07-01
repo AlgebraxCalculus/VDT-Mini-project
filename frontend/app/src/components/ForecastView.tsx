@@ -5,7 +5,7 @@ import { ApiError, apiListEvents, apiListRiskStations, apiListStations } from '.
 import { exportReport } from '../lib/report';
 import type { RiskAssessment } from '../types';
 
-/** One rendered table row: a station with its 7-day risk sparkline + peak. */
+/** One table row: a station with its 7-day risk sparkline + peak. */
 interface FcRow {
   id: number;
   stationCode: string;
@@ -30,10 +30,8 @@ function weekday(dateStr: string): string {
 }
 
 /**
- * Group API 36 rows (one per station × forecast day) into one row per station:
- * the per-day scores become the sparkline; "today" = the first day in the
- * window; peak = the highest-scoring day. Risk colour/label come from the
- * station's cached risk_status (joined on the assessment).
+ * Group API 36 rows (station × day) into one row per station: per-day scores become
+ * the sparkline, today = first day, peak = highest-scoring day. Colour from risk_status.
  */
 function buildApiRows(data: RiskAssessment[]): FcRow[] {
   const byStation = new Map<number, RiskAssessment[]>();
@@ -82,10 +80,8 @@ export default function ForecastView() {
   const [activeEvents, setActiveEvents] = useState<number>(0);
   const [exporting, setExporting] = useState(false);
 
-  // Load the at-risk station list from API 36 (grouped per station) + the total
-  // station count from Group C + the ongoing-event count from API 20. All start
-  // empty/zero and stay so on failure (the Risk Engine may not have run yet).
-  // setState only happens in async callbacks — never synchronously in the effect body.
+  // Load the at-risk list (API 36), total station count (Group C), and ongoing-event
+  // count (API 20). All stay empty/zero on failure (the Risk Engine may not have run).
   useEffect(() => {
     let cancelled = false;
     apiListRiskStations({ size: 100, sort: 'severity', includeLow: true })
@@ -104,8 +100,7 @@ export default function ForecastView() {
       .catch(() => {
         /* leave total at 0 on failure */
       });
-    // API 20 — count of ongoing events (KPI "Sự kiện đang hoạt động"). Only the
-    // total is needed, so request a single row.
+    // API 20 — ongoing-event count KPI; only the total is needed.
     apiListEvents({ status: 'ONGOING', size: 1 })
       .then((res) => {
         if (!cancelled) setActiveEvents(res.total);
@@ -118,9 +113,7 @@ export default function ForecastView() {
     };
   }, []);
 
-  // Group H — export the risk summary (API 40–43). "Word" downloads the HTML
-  // report as a .doc (Word opens it); "PDF" opens the print-ready HTML and fires
-  // the print dialog. setState stays in this async handler, never in an effect.
+  // Export the risk summary (APIs 40–43): "Word" saves the HTML as .doc; "PDF" prints it.
   const runReport = async (delivery: 'download' | 'print', asWord: boolean) => {
     if (exporting) return;
     setExporting(true);
@@ -142,7 +135,6 @@ export default function ForecastView() {
 
   const fcHigh = rows.filter((r) => r.peakVal >= 50).length;
   const fcVeryHigh = rows.filter((r) => r.peakVal >= 70).length;
-  // True once API 36 has returned at least one at-risk station.
   const liveData = loaded && rows.length > 0;
 
   return (

@@ -12,7 +12,7 @@ import {
 import type { ApiEvent, EventScope, EventStatus } from '../lib/api';
 import type { ProvinceRef } from '../types';
 
-// Backend lifecycle is only ONGOING/CLOSED (disaster_events.status) — no draft/monitor.
+// Backend lifecycle is only ONGOING/CLOSED.
 const STATUS_META: Record<EventStatus, { label: string; color: string; bg: string }> = {
   ONGOING: { label: 'Đang hoạt động', color: '#EE0033', bg: '#FDE7EB' },
   CLOSED: { label: 'Đã đóng', color: '#475569', bg: '#F1F5F9' },
@@ -49,9 +49,9 @@ function evStepStyle(i: number, cur: number) {
 export default function EventsView() {
   const { state, patch, showToast } = useApp();
   const { eventTab, eventDrawerId, role } = state;
-  const canWrite = role !== 'viewer'; // Operator/Admin per the RBAC matrix (API 25)
+  const canWrite = role !== 'viewer'; // Operator/Admin (API 25)
 
-  // Event list (API 20). Loaded once per reloadKey; tabs/counts derived client-side.
+  // Event list (API 20). Loaded per reloadKey; tabs/counts derived client-side.
   const [events, setEvents] = useState<ApiEvent[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

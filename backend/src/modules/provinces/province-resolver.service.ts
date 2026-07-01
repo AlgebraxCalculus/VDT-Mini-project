@@ -3,22 +3,11 @@ import { DataSource } from 'typeorm';
 import { GeocodingService } from '../geocoding/geocoding.service';
 
 /**
- * Resolves a coordinate to a `province_id`, creating a province when the point
- * falls outside every existing one.
- *
- * Order of attempts:
- *   1. **Spatial fast-path** — `ST_Contains` against the existing province
- *      boundaries (the same rule {@link StationsService.applyGeometry} uses). No
- *      network call when the point is already inside a known province.
- *   2. **Geocode + match by name** — reverse-geocode; if a province with that
- *      name already exists (e.g. the point sits just outside its crude seeded
- *      box), reuse it.
- *   3. **Create** — insert a new province using the geocoder's real admin polygon
- *      as the boundary, so subsequent nearby stations match via the fast-path.
- *
- * Returns `null` only when the point can't be geocoded to a province at all
- * (open sea / outside coverage), in which case the station keeps `province_id`
- * NULL — exactly the case the caller is trying to avoid, but unrecoverable here.
+ * Resolve a coordinate to a `province_id`, creating a province when the point falls
+ * outside every existing one. Attempts, in order: (1) ST_Contains against existing
+ * boundaries; (2) reverse-geocode + reuse a same-named province; (3) create one from
+ * the geocoded admin polygon. Returns `null` only when the point can't be geocoded
+ * to any province (open sea / outside coverage).
  */
 @Injectable()
 export class ProvinceResolverService {
@@ -72,8 +61,8 @@ export class ProvinceResolverService {
     const code = await this.uniqueCode(name);
     const geojson = polygon ? JSON.stringify(polygon) : null;
 
-    // boundary = the geocoded admin polygon (SRID-set + forced MultiPolygon);
-    // centroid = polygon centroid, or the point itself when no polygon was found.
+    // boundary = geocoded polygon (forced MultiPolygon); centroid = its centroid,
+    // or the point itself when no polygon was found.
     const inserted = await this.dataSource.query<{ id: number }[]>(
       `INSERT INTO provinces (code, name, boundary, centroid)
        VALUES (
@@ -113,7 +102,7 @@ export class ProvinceResolverService {
 
     let code = base;
     let i = 1;
-    // Codes are UNIQUE; probe for a free one. Bounded loop — names rarely collide.
+    // Probe for a free code — names rarely collide.
     while (await this.codeExists(code)) {
       const suffix = String(i++);
       code = `${base.slice(0, 20 - suffix.length)}${suffix}`;

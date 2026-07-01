@@ -20,16 +20,14 @@ const SEVERITY_LABEL: Record<string, string> = {
   LOW: 'Thấp',
 };
 
-/** Severity → numeric rank, for "worst severity in window" aggregation/ordering. */
+/** Severity → numeric rank for "worst severity in window" aggregation/ordering. */
 const SEVERITY_RANK_SQL = `CASE a.severity WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 WHEN 'LOW' THEN 1 ELSE 0 END`;
 const SEVERITY_RANK_NOALIAS = `CASE severity WHEN 'HIGH' THEN 3 WHEN 'MEDIUM' THEN 2 WHEN 'LOW' THEN 1 ELSE 0 END`;
 
 /**
- * BullMQ worker for report rendering (API 40). Pulls the rows for the requested
- * {@link ReportKind} (honoring the same province/q filters as the StationsView
- * list), builds a neutral {@link ReportTable}, renders it to CSV or HTML, and
- * stores the bytes in Redis under a TTL key for the download endpoint. The job
- * return value is metadata only.
+ * BullMQ worker for report rendering (API 40). Pulls rows for the requested
+ * {@link ReportKind}, builds a neutral {@link ReportTable}, renders to CSV or HTML,
+ * and stores the bytes in Redis under a TTL key. Returns metadata only.
  */
 @Processor(REPORT_QUEUE)
 export class ReportProcessor extends WorkerHost {
@@ -73,9 +71,7 @@ export class ReportProcessor extends WorkerHost {
     };
   }
 
-  // --------------------------------------------------------------------------
-  // Kind: station inventory (the StationsView export).
-  // --------------------------------------------------------------------------
+  // --- Kind: station inventory (StationsView export) ---
 
   private async buildStationInventory(
     params: ReportParams,
@@ -93,10 +89,9 @@ export class ReportProcessor extends WorkerHost {
     }
     args.push(REPORT_MAX_ROWS);
 
-    // Thresholds + current risk are pre-aggregated per station in CTEs (one
-    // grouped scan each) and LEFT JOINed — far cheaper at 10k stations than a
-    // correlated LATERAL subquery run once per row. "Current risk" = the worst
-    // severity + peak score in the [today, +7] window.
+    // Thresholds + current risk are pre-aggregated per station in CTEs and LEFT
+    // JOINed — far cheaper at 10k stations than a per-row LATERAL. Current risk =
+    // worst severity + peak score over [today, +7].
     const rowsRaw = await this.dataSource.query<StationRow[]>(
       `WITH thr AS (
          SELECT station_id,
@@ -167,16 +162,13 @@ export class ReportProcessor extends WorkerHost {
     };
   }
 
-  // --------------------------------------------------------------------------
-  // Kind: risk summary over the forecast window.
-  // --------------------------------------------------------------------------
+  // --- Kind: risk summary over the forecast window ---
 
   private async buildRiskSummary(params: ReportParams): Promise<ReportTable> {
     const from = params.from!;
     const to = params.to!;
     const provFilter = params.provinceId !== undefined ? 's.province_id = $3' : 'TRUE';
 
-    // Per-station worst day in the window (one row per station, ranked).
     const baseArgs: unknown[] = [from, to];
     if (params.provinceId !== undefined) baseArgs.push(params.provinceId);
 
@@ -207,7 +199,7 @@ export class ReportProcessor extends WorkerHost {
       rankArgs,
     );
 
-    // DISTINCT ON forces station_id ordering; re-sort by severity for display.
+    // DISTINCT ON forced station_id ordering; re-sort by severity for display.
     rowsRaw.sort(
       (x, y) =>
         sevRank(y.severity) - sevRank(x.severity) ||
@@ -256,9 +248,7 @@ export class ReportProcessor extends WorkerHost {
     };
   }
 
-  // --------------------------------------------------------------------------
-  // Helpers.
-  // --------------------------------------------------------------------------
+  // --- Helpers ---
 
   private filterCaption(params: ReportParams): string {
     const bits: string[] = [];

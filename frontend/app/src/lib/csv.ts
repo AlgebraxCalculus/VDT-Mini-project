@@ -1,8 +1,5 @@
-// Client-side CSV pre-flight for the import view. The nghiệp vụ doc calls for
-// "validate định dạng ngay tại client trước khi gọi API" — this parses the file
-// and flags format errors so the user sees them before uploading. The BACKEND
-// re-validates authoritatively (and owns DB-uniqueness/province checks); this is
-// advisory UX only. Header aliases + ranges mirror StationImportService/Processor.
+// Client-side CSV pre-flight for the import view — advisory only; the backend
+// re-validates authoritatively. Header aliases + ranges mirror the backend importer.
 
 export interface PreviewRow {
   rowNum: number;

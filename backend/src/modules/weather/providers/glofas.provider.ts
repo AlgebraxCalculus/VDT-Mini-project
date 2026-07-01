@@ -21,24 +21,18 @@ export interface RiverDaily {
 }
 
 /**
- * GloFAS (Copernicus EWDS) river-discharge source — the reachable replacement for
- * the network-blocked Open-Meteo Flood API. NOT a forecast provider: it returns a
- * gridded GRIB2 field once per day, so it runs on its own daily cadence
- * ({@link GlofasService}), not the hourly forecast chain.
+ * GloFAS (Copernicus EWDS) river-discharge source. Not a forecast provider: a
+ * gridded GRIB2 field once/day, so it runs on {@link GlofasService}'s daily cadence.
  *
- * Flow (OGC API – Processes over plain fetch): submit `cems-glofas-forecast` for a
- * bbox → poll the async job → download GRIB2 → extract each station's nearest grid
- * cell via a Python sidecar (cfgrib/xarray). Auth is the EWDS Personal Access Token
- * sent as the `PRIVATE-TOKEN` header; the source is skipped if EWDS_PAT is unset.
- *
- * UNITS: GloFAS yields river DISCHARGE (m³/s). This provider returns it raw;
- * {@link GlofasService} converts it to a water-level STAGE (m) on each station's
- * own flood-threshold scale (a self-anchored rating curve) before persisting.
+ * Flow (OGC API – Processes): submit `cems-glofas-forecast` for a bbox → poll → download
+ * GRIB2 → extract each station's nearest grid cell via a Python sidecar (cfgrib). Auth
+ * is the EWDS PAT as `PRIVATE-TOKEN`; skipped if EWDS_PAT is unset. Returns raw discharge
+ * (m³/s); {@link GlofasService} converts it to a stage (m).
  */
 @Injectable()
 export class GlofasProvider implements HealthCheckable {
   readonly code = WeatherSource.GLOFAS;
-  readonly requiresKey = true; // the EWDS PAT acts as the key
+  readonly requiresKey = true; // the EWDS PAT is the key
 
   private readonly logger = new Logger(GlofasProvider.name);
   private readonly base: string;
@@ -87,7 +81,7 @@ export class GlofasProvider implements HealthCheckable {
     };
   }
 
-  /** fetch with an AbortController timeout (EWDS jobs are async, calls are short). */
+  /** fetch with an AbortController timeout. */
   private async fetchT(url: string, init: RequestInit, ms = this.timeoutMs()) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), ms);
@@ -98,7 +92,7 @@ export class GlofasProvider implements HealthCheckable {
     }
   }
 
-  /** Liveness probe — reachability of the GloFAS process catalogue entry. */
+  /** Liveness probe against the GloFAS process catalogue entry. */
   async ping(timeoutMs?: number): Promise<number> {
     const started = Date.now();
     const res = await this.fetchT(
@@ -112,9 +106,7 @@ export class GlofasProvider implements HealthCheckable {
 
   /**
    * Full daily pull: submit → poll → download GRIB → extract per-station discharge.
-   * Returns a map stationId → daily river-discharge series. Throws on EWDS failure;
-   * a missing/failed Python sidecar yields an empty map with a logged warning
-   * (see note.txt — the GRIB-extraction sidecar dependency is the open gap).
+   * Throws on EWDS failure; a missing/failed sidecar yields an empty map + warning.
    */
   async fetchRiverDischarge(
     targets: RiverTarget[],
@@ -137,13 +129,9 @@ export class GlofasProvider implements HealthCheckable {
   }
 
   /**
-   * Submit the run, walking the date back day-by-day until EWDS accepts it.
-   * GloFAS operational forecast publishes with ~1 day latency, so the current
-   * day's run is usually not available yet (EWDS answers 400 "no valid
-   * combination of values" — the date is the only varying input here, the
-   * Vietnam `area` bbox and the rest are constant and known-valid). We retry
-   * earlier dates rather than fail the whole daily pull. Genuinely malformed
-   * requests (non-date 400s, auth, 5xx) are rethrown immediately.
+   * Submit, walking the date back day-by-day until EWDS accepts it. GloFAS publishes
+   * with ~1 day latency, so today's run 400s with "no valid combination"; retry earlier
+   * dates rather than fail. Other 400s / auth / 5xx are rethrown immediately.
    */
   private async submitWithDateFallback(date: Date): Promise<string> {
     const maxLookback = parseInt(
@@ -165,7 +153,7 @@ export class GlofasProvider implements HealthCheckable {
           lastErr = err as Error;
           continue;
         }
-        throw err; // not a date-availability 400 — surface it
+        throw err; // not a date-availability 400
       }
     }
     throw (
@@ -238,16 +226,15 @@ export class GlofasProvider implements HealthCheckable {
     const res = await this.fetchT(
       href,
       { headers: { 'PRIVATE-TOKEN': this.pat ?? '' } },
-      this.timeoutMs() * 3, // the GRIB can be a few MB
+      this.timeoutMs() * 3, // GRIB can be a few MB
     );
     if (!res.ok) throw new Error(`GloFAS download HTTP ${res.status}`);
     await writeFile(outPath, Buffer.from(await res.arrayBuffer()));
   }
 
   /**
-   * Spawn the Python sidecar to map GRIB grid cells → stations. The sidecar reads
-   * the GRIB path + a stations JSON (stdin) and prints {stationId: [{date,discharge}]}.
-   * Pure-Node GRIB decoding is impractical, hence the sidecar (cfgrib/xarray).
+   * Spawn the Python sidecar (cfgrib) to map GRIB grid cells → stations: reads the
+   * GRIB path + stations JSON (stdin), prints {stationId: [{date,discharge}]}.
    */
   private extractPerStation(
     gribPath: string,
@@ -261,8 +248,7 @@ export class GlofasProvider implements HealthCheckable {
         { timeout: 180000, maxBuffer: 64 * 1024 * 1024 },
         (err, stdout, stderr) => {
           if (err) {
-            // Don't crash the app — skip river enrichment this run, but surface the
-            // sidecar's stderr so the real cause is visible (deps, GRIB, timeout…).
+            // Skip river enrichment this run; surface stderr for the real cause.
             this.logger.warn(
               `GloFAS extraction failed: ${err.message}${
                 stderr ? ` | stderr: ${String(stderr).slice(0, 300)}` : ''

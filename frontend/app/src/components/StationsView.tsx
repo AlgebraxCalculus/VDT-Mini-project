@@ -28,8 +28,7 @@ const inputBase: CSSProperties = {
   margin: '7px 0 16px',
 };
 
-// Vietnam bounding box (mainland + offshore islands) — matches the backend
-// CreateStationDto / UpdateStationDto bounds so FE and BE reject the same coords.
+// Vietnam bounding box — matches the backend DTO bounds so FE/BE reject the same coords.
 const LAT_MIN = 6;
 const LAT_MAX = 24;
 const LNG_MIN = 102;
@@ -75,9 +74,8 @@ export default function StationsView() {
 
   const reload = () => setReloadKey((k) => k + 1);
 
-  // API 40–43 — export the current (filtered) station list as a report. CSV
-  // downloads directly; HTML opens print-ready (→ PDF). Honors the same
-  // province/search filters as the table so the export matches the view.
+  // API 40–43 — export the filtered station list (CSV downloads, HTML prints to PDF),
+  // honoring the same province/search filters as the table.
   const runExport = async (format: ReportFormat) => {
     if (exporting) return;
     setExportMenu(false);
@@ -105,8 +103,7 @@ export default function StationsView() {
       .catch(() => setProvinces([]));
   }, []);
 
-  // Fetch the station page whenever filters / page change. The free-text query
-  // is debounced so typing doesn't fire a request per keystroke.
+  // Fetch the station page on filter/page change; the free-text query is debounced.
   useEffect(() => {
     let cancelled = false;
     const provinceId = stnProv === 'all' ? undefined : Number(stnProv);

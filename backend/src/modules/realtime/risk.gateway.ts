@@ -32,18 +32,12 @@ const corsOrigins = (process.env.CORS_ORIGINS ?? 'http://localhost:5173')
   .filter(Boolean);
 
 /**
- * Real-time gateway (API 44–47).
+ * Real-time gateway (API 44–47): 44 handshake JWT auth, 45 `subscribe:viewport`
+ * (join a bbox's tile rooms), 47 `unsubscribe:viewport`, 46 `risk:delta` (bus →
+ * the one room the station sits in).
  *
- *   44 — connection: JWT access token verified in a Socket.IO middleware during
- *        the handshake (auth.token / Authorization header / query.token).
- *   45 — `subscribe:viewport`: join the tile rooms a bbox covers.
- *   47 — `unsubscribe:viewport`: leave all viewport rooms.
- *   46 — `risk:delta` (server→client): driven by the Redis event bus; each
- *        delta is fanned out to the one room the station sits in.
- *
- * Scaling: the Socket.IO redis-adapter (wired in main.ts) shares rooms across
- * instances. Deltas arrive on every instance via the bus, so we emit with
- * `.local` to reach only this instance's sockets — exactly-once cluster-wide.
+ * The redis-adapter (main.ts) shares rooms across instances and deltas arrive on
+ * every instance via the bus, so `.local` gives exactly-once cluster-wide delivery.
  */
 @WebSocketGateway({ cors: { origin: corsOrigins, credentials: true } })
 export class RiskGateway
@@ -62,8 +56,7 @@ export class RiskGateway
   ) {}
 
   afterInit(server: Server): void {
-    // API 44 — authenticate at the handshake. Rejecting here surfaces as a
-    // `connect_error` on the client; the socket never opens.
+    // API 44 — authenticate at the handshake; rejection surfaces as connect_error.
     server.use((socket: Socket, next: (err?: Error) => void) => {
       void this.authenticate(socket)
         .then(() => next())
@@ -98,7 +91,7 @@ export class RiskGateway
       return { status: 'error', message: 'invalid bbox' };
     }
 
-    // A viewport change re-subscribes: drop the old tiles before joining new ones.
+    // Re-subscribe: drop old tiles before joining new ones.
     this.leaveViewportRooms(client);
 
     const { rooms, clamped } = bboxToRooms(bbox);
@@ -120,11 +113,9 @@ export class RiskGateway
     return { status: 'ok' };
   }
 
-  // ----------------------------------------------------------------------------
-  // Internals.
-  // ----------------------------------------------------------------------------
+  // --- Internals ---
 
-  /** Verify the access token from the handshake and stash the principal. */
+  /** Verify the handshake access token and stash the principal. */
   private async authenticate(socket: Socket): Promise<void> {
     const token = extractToken(socket);
     if (!token) throw new Error('missing token');

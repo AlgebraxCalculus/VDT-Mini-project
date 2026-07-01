@@ -43,18 +43,11 @@ export class AuthService {
     private readonly tokenStore: TokenStoreService,
   ) {}
 
-  /**
-   * POST /auth/login flow:
-   *   1. Load the user (with role) and verify the password against the bcrypt hash.
-   *   2. Reject inactive/locked accounts.
-   *   3. Mint an access token (role + permissions packed in) and a refresh token.
-   *   4. Whitelist the refresh token (for later rotation/revoke) and stamp last login.
-   */
+  /** Verify credentials, reject inactive accounts, mint tokens, stamp last login. */
   async login(username: string, password: string): Promise<LoginResult> {
     const user = await this.usersService.findByUsernameWithSecret(username);
 
-    // Use a single generic message for "no user" and "wrong password" so we
-    // don't leak which usernames exist.
+    // One generic message for no-user and wrong-password so usernames don't leak.
     if (!user) {
       throw new UnauthorizedException('Invalid credentials');
     }
@@ -85,11 +78,8 @@ export class AuthService {
   }
 
   /**
-   * POST /auth/refresh flow (rotating refresh tokens):
-   *   1. Verify the refresh token signature/expiry against the refresh secret.
-   *   2. Ensure its jti is still whitelisted (not already rotated/revoked).
-   *   3. Revoke the used jti, reload the user (role may have changed), and mint
-   *      a brand-new access+refresh pair.
+   * Rotating refresh: verify the token, ensure its jti is still whitelisted, revoke
+   * it, reload the user (role may have changed), and mint a fresh pair.
    */
   async refresh(refreshToken: string): Promise<AuthTokens> {
     let payload: RefreshTokenPayload;
@@ -106,12 +96,12 @@ export class AuthService {
       throw new UnauthorizedException('Invalid token type');
     }
 
-    // One-time-use: the jti must still be whitelisted for this user.
+    // One-time-use: the jti must still be whitelisted.
     if (!(await this.tokenStore.isRefreshTokenValid(payload.jti, payload.sub))) {
       throw new UnauthorizedException('Refresh token has been revoked');
     }
 
-    // Also honor a global invalidation cut-off (logout-everywhere / role change).
+    // Also honor the global invalidation epoch.
     if (!(await this.tokenStore.isTokenStillValid(payload.sub, payload.iat))) {
       throw new UnauthorizedException('Refresh token has been revoked');
     }
@@ -121,15 +111,11 @@ export class AuthService {
       throw new UnauthorizedException('Account no longer active');
     }
 
-    // Rotate: invalidate the presented refresh token before issuing the next one.
     await this.tokenStore.revokeRefreshToken(payload.jti);
     return this.issueTokens(user);
   }
 
-  /**
-   * POST /auth/logout flow: revoke the presented refresh token and bump the
-   * user's invalidation cut-off so the still-valid access token dies too.
-   */
+  /** Revoke the refresh token and bump the user's epoch so the access token dies too. */
   async logout(userId: number, refreshToken?: string): Promise<void> {
     if (refreshToken) {
       try {
@@ -141,17 +127,13 @@ export class AuthService {
           await this.tokenStore.revokeRefreshToken(payload.jti);
         }
       } catch {
-        // Malformed/expired refresh token on logout is non-fatal — proceed to
-        // invalidate the user's access tokens anyway.
+        // Malformed/expired refresh token on logout is non-fatal.
       }
     }
     await this.tokenStore.invalidateUser(userId);
   }
 
-  /**
-   * GET /auth/me — re-reads the user so the FE always gets the current role and
-   * permission set (the token snapshot may be stale right after a role change).
-   */
+  /** GET /auth/me — re-reads the user so the FE gets the current role/permissions. */
   async getProfile(userId: number): Promise<LoginResult['user']> {
     const user = await this.usersService.findEntityById(userId);
     if (!user) {
@@ -167,9 +149,7 @@ export class AuthService {
     };
   }
 
-  // ----------------------------------------------------------------------------
-  // Token minting.
-  // ----------------------------------------------------------------------------
+  // --- Token minting ---
 
   /** Build + sign the access/refresh pair and whitelist the refresh jti. */
   private async issueTokens(user: User): Promise<AuthTokens> {
@@ -212,7 +192,6 @@ export class AuthService {
     };
   }
 
-  /** Helper exposed for any future server-side checks. */
   buildAuthenticatedUser(payload: AccessTokenPayload): AuthenticatedUser {
     return {
       id: payload.sub,

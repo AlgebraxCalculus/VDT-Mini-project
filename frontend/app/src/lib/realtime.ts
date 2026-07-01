@@ -1,12 +1,5 @@
-// Real-time client for the risk WebSocket gateway (APIs 44–47). The NestJS gateway
-// (RiskGateway) speaks the Socket.IO protocol — not a raw WebSocket — so this wraps
-// socket.io-client. One shared connection per tab; the map subscribes to its
-// viewport's tile rooms and receives `risk:delta` pushes for the stations in view.
-//
-//   44 — connection: JWT access token sent via `auth.token` at the handshake.
-//   45 — `subscribe:viewport`: join the tile rooms a bbox covers.
-//   46 — `risk:delta` (server→client): a station's recomputed risk.
-//   47 — `unsubscribe:viewport`: leave all viewport rooms.
+// Socket.IO client for the risk gateway (APIs 44–47): one shared connection per tab
+// that subscribes to the map viewport's tile rooms and receives `risk:delta` pushes.
 
 import { io, type Socket } from 'socket.io-client';
 import type { RiskSeverity, RiskStatus } from '../types';
@@ -32,14 +25,12 @@ export type RealtimeStatus = 'connecting' | 'connected' | 'disconnected';
 let socket: Socket | null = null;
 
 /**
- * Lazily open the shared Socket.IO connection (API 44 handshake). The JWT is sent
- * via `auth.token`; passing a function makes socket.io re-read it on every
- * (re)connect, so a rotated access token is picked up without rebuilding the socket.
+ * Lazily open the shared connection (API 44). `auth` as a callback is re-invoked on
+ * every reconnect, so a rotated access token is picked up without rebuilding the socket.
  */
 function getSocket(): Socket {
   if (socket) return socket;
   socket = io(API_BASE, {
-    // `auth` as a callback is re-invoked on every reconnect → always the latest token.
     auth: (cb) => cb({ token: getAccessToken() ?? '' }),
   });
   return socket;
@@ -64,11 +55,7 @@ export function onRiskDelta(handler: (delta: RiskDelta) => void): () => void {
   };
 }
 
-/**
- * Subscribe to connection-status changes. The current state is reported on the
- * next microtask (not synchronously) so callers can `setState` from the resolved
- * callback without tripping the set-state-in-effect lint rule.
- */
+/** Subscribe to connection-status changes; current state is reported on the next microtask. */
 export function onRealtimeStatus(handler: (status: RealtimeStatus) => void): () => void {
   const s = getSocket();
   const onConnect = () => handler('connected');

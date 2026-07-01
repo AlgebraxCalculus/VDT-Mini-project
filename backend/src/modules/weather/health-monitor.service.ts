@@ -4,7 +4,7 @@ import { RedisService } from '../../redis/redis.service';
 import { HEALTH_KEY_PREFIX, HEALTH_PROVIDERS } from './weather.constants';
 import { HealthCheckable } from './providers/weather-provider.interface';
 
-/** Last-known health of one external source (API 35 payload item). */
+/** Last-known health of one external source. */
 export interface SourceHealth {
   code: string;
   configured: boolean;
@@ -17,9 +17,8 @@ export interface SourceHealth {
 }
 
 /**
- * Pings each external source on a schedule and caches the result in Redis so
- * API 35 can read it directly (per design: "read healthcheck straight from
- * Redis"). Keeps rolling success/total counters per source for an error rate.
+ * Pings each external source on a schedule and caches the result in Redis for API 35
+ * to read directly. Keeps rolling success/total counters per source for an error rate.
  */
 @Injectable()
 export class HealthMonitorService {
@@ -66,10 +65,8 @@ export class HealthMonitorService {
     try {
       latencyMs = await provider.ping(this.pingTimeoutMs);
     } catch (err) {
-      // Node's global fetch wraps every network-level failure in a generic
-      // "fetch failed" — the actionable reason (ETIMEDOUT, ENETUNREACH, DNS,
-      // IPv6 unroutable, TLS…) lives in err.cause. Surface it so API 35 shows
-      // *why* a source is DOWN instead of an opaque "fetch failed".
+      // Global fetch hides the real cause (ETIMEDOUT/ENETUNREACH/DNS…) behind
+      // "fetch failed"; unwrap it so API 35 shows why the source is DOWN.
       error = describeError(err);
     }
 
@@ -104,8 +101,6 @@ export class HealthMonitorService {
     await this.redis.client.set(key, JSON.stringify(value));
   }
 
-  // describeError lives at module scope (below the class).
-
   /** Read the latest cached health of every source (API 35). */
   async getAll(): Promise<SourceHealth[]> {
     const results: SourceHealth[] = [];
@@ -129,11 +124,7 @@ export class HealthMonitorService {
   }
 }
 
-/**
- * Build a human-readable error string, unwrapping the `cause` chain that Node's
- * global fetch hides behind a generic "fetch failed". Surfaces codes like
- * ETIMEDOUT / ENETUNREACH / ENOTFOUND so a DOWN source is actually diagnosable.
- */
+/** Human-readable error string, unwrapping fetch's hidden `cause` chain. */
 function describeError(err: unknown): string {
   const e = err as { message?: string; code?: string; cause?: unknown } | null;
   const parts: string[] = [];

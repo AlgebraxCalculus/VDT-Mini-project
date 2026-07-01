@@ -20,8 +20,7 @@ import {
 import { subscribeViewport, unsubscribeViewport, onRiskDelta, onRealtimeStatus, type RealtimeStatus } from '../lib/realtime';
 import type { AlertHistoryEntry, ClassifiedForecastPoint, ForecastPoint, MapLayout, Station, WeatherLayerKey } from '../types';
 
-// Map the FE weather-layer buttons to the backend overlay field (API 29). 'radar'
-// is a rain-intensity visualization, so it reads the same rainfall field as 'rain'.
+// FE weather-layer buttons → backend overlay field (API 29). 'radar' reads rainfall like 'rain'.
 const WEATHER_OVERLAY_LAYER: Record<WeatherLayerKey, WeatherOverlayLayer> = {
   temp: 'temp',
   rain: 'rain',
@@ -29,8 +28,7 @@ const WEATHER_OVERLAY_LAYER: Record<WeatherLayerKey, WeatherOverlayLayer> = {
   wind: 'wind',
 };
 
-// Per-layer overlay colour + the value (in the layer's unit) treated as full
-// intensity, used to scale each forecast point's opacity in [0.08, 0.32].
+// Per-layer overlay colour + the value treated as full intensity (scales point opacity).
 const WEATHER_OVERLAY_STYLE: Record<WeatherLayerKey, { color: string; max: number }> = {
   temp: { color: '#F97316', max: 38 },
   rain: { color: '#2563EB', max: 50 },
@@ -38,30 +36,29 @@ const WEATHER_OVERLAY_STYLE: Record<WeatherLayerKey, { color: string; max: numbe
   wind: { color: '#EC4899', max: 20 },
 };
 
-// Placeholder bar heights for the scrubber before a station's real series loads.
-// The dates are computed live (today → today+6) in `scrubDays`, not hardcoded.
+// Placeholder scrubber bar heights before a station's real series loads.
 const SCRUB_HEIGHTS = [26, 30, 38, 34, 28, 22, 18];
 
-// alert_histories.alert_level → colour (1 Chú ý, 2 Cảnh báo, 3 Nguy hiểm).
+// alert_level → colour (1 Chú ý, 2 Cảnh báo, 3 Nguy hiểm).
 const ALERT_LEVEL_COLOR: Record<number, string> = { 1: '#EAB308', 2: '#F97316', 3: '#EE0033' };
 
-/** Format an ISO timestamp as dd/MM/yyyy HH:mm for the alert-history timeline. */
+/** Format an ISO timestamp as dd/MM/yyyy HH:mm. */
 function fmtDateTime(iso: string): string {
   const d = new Date(iso);
   const p = (n: number) => String(n).padStart(2, '0');
   return `${p(d.getDate())}/${p(d.getMonth() + 1)}/${d.getFullYear()} ${p(d.getHours())}:${p(d.getMinutes())}`;
 }
 
-/** Day/month label (d/M) for a YYYY-MM-DD / ISO date — used by the forecast scrubber. */
+/** Day/month label (d/M) for an ISO date. */
 const dayMonth = (iso: string) => {
   const d = new Date(iso);
   return `${d.getDate()}/${d.getMonth() + 1}`;
 };
 
-/** Scrubber bar height (px) from a day's rainfall (mm) — the flood-relevant signal. */
+/** Scrubber bar height (px) from a day's rainfall (mm). */
 const rainBarHeight = (rain: number | null) => Math.max(6, Math.min(40, 8 + (rain ?? 0) * 0.9));
 
-// 8-point Vietnamese compass (B=North, Đ=East, N=South, T=West), 45° per sector.
+// 8-point Vietnamese compass (B=N, Đ=E, N=S, T=W), 45° per sector.
 const COMPASS = ['B', 'ĐB', 'Đ', 'ĐN', 'N', 'TN', 'T', 'TB'];
 const windDir = (deg: number | null) => (deg == null ? '' : COMPASS[Math.round(deg / 45) % 8]);
 
@@ -83,9 +80,7 @@ export default function MapView() {
 
   const mapNodeRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
-  // All ~10k stations are drawn as small squares onto a single shared canvas
-  // renderer (not DOM markers, not clustered) — this is what keeps a full-country
-  // "coverage" layer performant at 10k features. stationLayerRef holds them.
+  // Stations draw onto one shared canvas renderer (not DOM markers) to stay fast at 10k features.
   const stationLayerRef = useRef<L.LayerGroup | null>(null);
   const stationRendererRef = useRef<L.Canvas | null>(null);
   const weatherGroupRef = useRef<L.LayerGroup | null>(null);
@@ -93,50 +88,34 @@ export default function MapView() {
   const markerByIdRef = useRef<Record<number, L.CircleMarker>>({});
   const viewRef = useRef<{ c: [number, number]; z: number }>({ c: [16.4, 107.0], z: 6 });
 
-  // Real station data — fetched per map viewport (GET /map/stations, a GIST-indexed
-  // BBOX query enriched with risk + a light forecast), refetched on pan/zoom
-  // (debounced). When the map is zoomed out the server returns grid clusters
-  // instead (`clusters` below) and `stations` is empty. Markers re-render when
-  // these change; risk/weather panels read them null-safe.
+  // Viewport stations (API 27), refetched debounced on pan/zoom. Zoomed out the
+  // server returns grid clusters instead and `stations` is empty.
   const [stations, setStations] = useState<Station[]>([]);
   const [clusters, setClusters] = useState<MapCluster[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
-  // Active events (API 28) + their affected polygons, and the weather overlay
-  // points (API 29) — both viewport-scoped and refetched on pan via viewportVersion.
+  // Active events (API 28) + weather overlay points (API 29), viewport-scoped, refetched via viewportVersion.
   const [mapEvents, setMapEvents] = useState<MapEvent[]>([]);
   const [weatherPoints, setWeatherPoints] = useState<{ lat: number; lng: number; value: number }[]>([]);
-  // DB-backed viewport search (API 30) — replaces the old in-memory filter so it
-  // works even when the map is clustered (no individual stations loaded client-side).
+  // DB-backed viewport search (API 30) — works even when clustered.
   const [searchResults, setSearchResults] = useState<Station[]>([]);
-  // Bumped (debounced) on every moveend so the event/weather effects refetch for
-  // the new rectangle without each owning its own map listener.
+  // Bumped (debounced) on moveend so the event/weather effects refetch the new rectangle.
   const [viewportVersion, setViewportVersion] = useState(0);
 
-  // Real-time risk channel (APIs 44–47). `rtStatus` powers the live pill; deltas
-  // for stations in view are merged into `stations` below.
+  // Real-time risk channel (APIs 44–47); powers the live pill and merges deltas into `stations`.
   const [rtStatus, setRtStatus] = useState<RealtimeStatus>('connecting');
 
-  // Selected-station detail (APIs 38 & 39) — loaded from the real API on select
-  // (starts empty, never mock). setState lives in the .then() callbacks of the
-  // effect below (not a synchronous effect body) to respect the project's
-  // set-state-in-effect baseline.
+  // Selected-station detail (APIs 38 & 39), loaded on select.
   const [selForecast, setSelForecast] = useState<ClassifiedForecastPoint[]>([]);
   const [selHistory, setSelHistory] = useState<AlertHistoryEntry[]>([]);
-  // Province aggregate forecast (API 37) of the selected station's province —
-  // the single source the scrubber shows (the per-station series feeds only the
-  // panel's 7-day risk bars, not the scrubber).
+  // Province aggregate forecast (API 37) — the only series the scrubber shows.
   const [provForecast, setProvForecast] = useState<ForecastPoint[]>([]);
-  // Detail (API 13) of the selected station, used as a fallback for the panel
-  // when the station was selected from another view (e.g. ForecastView's risk
-  // table) and isn't in the current map viewport yet — so the panel renders
-  // immediately and the fly-to has coordinates. Guarded by flownToRef so the
-  // fetch + fly happen once per selection, not on every pan.
+  // Detail (API 13) fallback when the station was selected from another view and
+  // isn't in the viewport yet, so the panel + fly-to have data. Guarded by flownToRef.
   const [selDetail, setSelDetail] = useState<Station | null>(null);
   const flownToRef = useRef<number | null>(null);
-  // Latest viewport stations mirrored into a ref so the fly-to effect can do its
-  // "already in view" check without depending on `stations` — depending on it made
-  // every pan re-run the effect and cancel the in-flight detail fetch mid-select.
+  // Viewport stations mirrored into a ref so the fly-to effect's "already in view"
+  // check doesn't depend on `stations` (which would re-run it on every pan).
   const stationsRef = useRef<Station[]>([]);
   useEffect(() => { stationsRef.current = stations; }, [stations]);
 
@@ -151,14 +130,8 @@ export default function MapView() {
       attribution: '© OpenStreetMap · © CARTO',
     }).addTo(map);
 
-    // Dedicated panes so hit-testing order is deterministic regardless of which
-    // fetch resolves first. Both the weather-overlay circles and the event-area
-    // polygons are interactive SVG in Leaflet's default overlayPane (z 400); the
-    // station dots draw on a canvas in the same pane, so whichever renderer's DOM
-    // node lands last would sit on top. Left to chance, an event polygon (its only
-    // handler being a tooltip) intercepts clicks meant for stations inside the
-    // affected area — the station's detail panel never opens. Pinning overlays
-    // below the stations pane fixes the click target. (overlayPane = 400.)
+    // Dedicated panes so station clicks always win over the overlay polygons (which
+    // would otherwise intercept clicks meant for stations inside an event's area).
     map.createPane('fws-overlays').style.zIndex = '410';
     map.createPane('fws-stations').style.zIndex = '450';
 
@@ -167,24 +140,15 @@ export default function MapView() {
     weatherGroupRef.current = weatherGroup;
     eventGroupRef.current = eventGroup;
 
-    // Shared canvas renderer for the station squares: one <canvas> draws all
-    // features in a single pass instead of 10k DOM nodes. padding keeps squares
-    // just off-screen rendered so they don't pop in at the viewport edge. Pinned
-    // to the stations pane so its clicks always win over the overlay polygons.
+    // Shared canvas renderer, pinned to the stations pane so clicks win over overlays.
     const stationRenderer = L.canvas({ padding: 0.5, pane: 'fws-stations' });
     stationRendererRef.current = stationRenderer;
     const stationLayer = L.layerGroup().addTo(map);
     stationLayerRef.current = stationLayer;
 
-    // Event polygons (API 28) are drawn into eventGroup by a dedicated effect that
-    // refetches per viewport — no static placeholder geometry here.
-
-    // Fetch the stations inside the current map rectangle (API 27). Reads bounds +
-    // zoom fresh on each call (no stale closure). The server returns either
-    // individual enriched stations or grid clusters depending on zoom; we route
-    // each into its own state. Bumping viewportVersion drives the event/weather
-    // refetch effects. setState runs inside the resolved-promise / timer callbacks,
-    // not synchronously in the effect body, per the project's lint baseline.
+    // Fetch the stations in the current rectangle (API 27), reading bounds + zoom
+    // fresh each call. The server returns enriched stations or clusters by zoom;
+    // bumping viewportVersion drives the event/weather refetch effects.
     const fetchInView = () => {
       const m = mapRef.current;
       if (!m) return;
@@ -195,7 +159,7 @@ export default function MapView() {
         maxLng: b.getEast(),
         maxLat: b.getNorth(),
       };
-      // Re-join the viewport's tile rooms (API 45) so live deltas track the pan/zoom.
+      // Re-join the viewport's tile rooms (API 45) so live deltas track pan/zoom.
       subscribeViewport(bbox);
       setLoading(true);
       apiGetMapStations(bbox, { zoom: Math.round(m.getZoom()) })
@@ -225,7 +189,7 @@ export default function MapView() {
       debounce = setTimeout(fetchInView, 350);
     });
 
-    // Initial paint + first load once the container has its real size.
+    // Initial paint + first load once the container has real size.
     const initTimer = setTimeout(() => {
       map.invalidateSize();
       fetchInView();
@@ -234,17 +198,15 @@ export default function MapView() {
     return () => {
       clearTimeout(debounce);
       clearTimeout(initTimer);
-      unsubscribeViewport(); // API 47 — stop deltas when the map unmounts
+      unsubscribeViewport(); // API 47 — stop deltas on unmount
       viewRef.current = { c: [map.getCenter().lat, map.getCenter().lng], z: map.getZoom() };
       map.remove();
       mapRef.current = null;
     };
   }, []);
 
-  // Real-time risk deltas (API 46): merge each delta into the matching station in
-  // view, and track connection status for the live pill. setState runs inside the
-  // socket-event / resolved-promise callbacks (never synchronously in the effect
-  // body), so this respects the project's set-state-in-effect baseline.
+  // Real-time risk deltas (API 46): merge each into the matching in-view station and
+  // track connection status for the live pill.
   useEffect(() => {
     const offDelta = onRiskDelta((d) => {
       setStations((prev) => {
@@ -254,7 +216,7 @@ export default function MapView() {
           hit = true;
           return { ...s, riskStatus: d.riskStatus, severity: d.severity ?? undefined };
         });
-        return hit ? next : prev; // delta for an off-screen station → no re-render
+        return hit ? next : prev; // off-screen station → no re-render
       });
     });
     const offStatus = onRealtimeStatus(setRtStatus);
@@ -264,12 +226,8 @@ export default function MapView() {
     };
   }, []);
 
-  // (Re)build the station layer whenever the fetched data changes. Two mutually
-  // exclusive modes from API 27:
-  //   • zoomed out → `clusters`: one bubble per grid cell, sized by count and
-  //     coloured by the cell's worst risk status (server-side clustering).
-  //   • zoomed in  → `stations`: individual dots on the shared canvas renderer,
-  //     coloured by the station's real risk status with riskScore in the popup.
+  // (Re)build the station layer on data change: clusters (bubble per grid cell) when
+  // zoomed out, else individual dots coloured by risk status.
   useEffect(() => {
     const stationLayer = stationLayerRef.current;
     const renderer = stationRendererRef.current;
@@ -283,7 +241,7 @@ export default function MapView() {
         const meta = riskMeta(c.riskStatus);
         const r = Math.min(26, 11 + Math.sqrt(c.count) * 1.6);
         const bubble = L.circleMarker([c.lat, c.lng], {
-          renderer, // stations pane — stays clickable above the overlay polygons
+          renderer, // stations pane — stays clickable above overlays
           radius: r,
           color: '#fff',
           weight: 2,
@@ -299,7 +257,7 @@ export default function MapView() {
     }
 
     stations.forEach((s) => {
-      if (s.latitude == null || s.longitude == null) return; // unmappable (no geom)
+      if (s.latitude == null || s.longitude == null) return; // no geom
       const meta = riskMeta(s.riskStatus);
       const dot = L.circleMarker([s.latitude, s.longitude], {
         renderer,
@@ -310,10 +268,8 @@ export default function MapView() {
         fillOpacity: 0.92,
       });
       const scoreChip = s.riskScore != null ? ` · Chỉ số ${s.riskScore}` : '';
-      // Hover tooltip for a quick read; the click opens the rich detail panel
-      // (selectedId → panel). We deliberately DON'T bindPopup: a popup would open
-      // on the same click (and autoPan the map, triggering a viewport refetch that
-      // could swap out the marker mid-interaction) — the side panel is the detail.
+      // Tooltip for a quick read; click opens the detail panel. No bindPopup — its
+      // autoPan would trigger a viewport refetch that swaps out the marker mid-click.
       dot.bindTooltip(
         `<b>${s.name}</b><br><span style="color:#9AA0A6;font-family:monospace;font-size:11px;">${s.stationCode} · ${s.province?.name ?? '—'}</span><br><span style="color:${meta.color};font-weight:700;">${meta.label}${scoreChip}</span>`,
         { direction: 'top', offset: [0, -4], opacity: 0.97 },
@@ -326,8 +282,6 @@ export default function MapView() {
   }, [stations, clusters, patch]);
 
   // Active-event polygons (API 28): redraw eventGroup from the fetched footprints.
-  // Each affected area is a GeoJSON Polygon/MultiPolygon (event_provinces.affected_area
-  // union); we draw it in the brand red with the event name as a sticky tooltip.
   useEffect(() => {
     const eventGroup = eventGroupRef.current;
     if (!eventGroup) return;
@@ -335,7 +289,7 @@ export default function MapView() {
     mapEvents.forEach((ev) => {
       if (!ev.affectedArea) return;
       const layer = L.geoJSON(ev.affectedArea, {
-        pane: 'fws-overlays', // below the stations pane so it never eats station clicks
+        pane: 'fws-overlays', // below stations so it never eats station clicks
         style: { color: '#EE0033', weight: 2, fillColor: '#EE0033', fillOpacity: 0.08, dashArray: '6 5' },
       });
       layer.bindTooltip(`${ev.name} · Vùng ảnh hưởng (${ev.stationCount} trạm)`, { sticky: true });
@@ -343,8 +297,7 @@ export default function MapView() {
     });
   }, [mapEvents]);
 
-  // Active events in view (API 28) — refetched per viewport (viewportVersion).
-  // setState runs in the resolved-promise callback; failure clears the overlay.
+  // Active events in view (API 28) — refetched per viewport.
   useEffect(() => {
     const m = mapRef.current;
     if (!m) return;
@@ -354,9 +307,7 @@ export default function MapView() {
       .catch(() => setMapEvents([]));
   }, [viewportVersion]);
 
-  // Weather overlay points (API 29) — fetched for the active layer, refetched on
-  // pan (viewportVersion). setState in the resolved callback; the draw effect below
-  // renders them. 'radar' maps to the rainfall field server-side.
+  // Weather overlay points (API 29) for the active layer, refetched on pan.
   useEffect(() => {
     if (!weatherLayer) {
       Promise.resolve().then(() => setWeatherPoints([]));
@@ -373,8 +324,7 @@ export default function MapView() {
       .catch(() => setWeatherPoints([]));
   }, [weatherLayer, viewportVersion]);
 
-  // Draw the weather overlay: one soft circle per forecast point, opacity scaled by
-  // the field value vs the layer's full-intensity reference. Cleared when off.
+  // Draw the weather overlay: one soft circle per point, opacity scaled by value.
   useEffect(() => {
     const weatherGroup = weatherGroupRef.current;
     if (!weatherGroup) return;
@@ -384,7 +334,7 @@ export default function MapView() {
     weatherPoints.forEach((p) => {
       const intensity = Math.max(0, Math.min(1, p.value / style.max));
       L.circle([p.lat, p.lng], {
-        pane: 'fws-overlays', // keep the soft overlay under the stations pane
+        pane: 'fws-overlays', // keep the soft overlay under stations
         radius: 26000,
         color: style.color,
         weight: 0,
@@ -395,11 +345,8 @@ export default function MapView() {
     });
   }, [weatherLayer, weatherPoints]);
 
-  // Load the selected station's 7-day forecast (API 38) + alert history (API 39).
-  // Keyed by station id only — the forecast/history don't change on pan, so this
-  // doesn't refire when the viewport refetches. setState runs inside the resolved-
-  // promise callbacks (never synchronously in the effect body); errors clear the
-  // panel rather than break it (401 is handled by the transparent refresh in request).
+  // Selected station's 7-day forecast (API 38) + alert history (API 39). Keyed by id
+  // only so it doesn't refire on pan; errors clear the panel rather than break it.
   useEffect(() => {
     let alive = true;
     if (selectedId == null) {
@@ -410,8 +357,7 @@ export default function MapView() {
       });
       return () => { alive = false; };
     }
-    // Station forecast feeds the panel's 7-day risk bars only; the scrubber's day
-    // count is driven by the province series (effect below).
+    // Feeds the panel's 7-day risk bars; the scrubber's day count comes from the province series.
     apiGetStationForecast(selectedId)
       .then((f) => { if (alive) setSelForecast(f.series); })
       .catch(() => { if (alive) setSelForecast([]); });
@@ -421,22 +367,11 @@ export default function MapView() {
     return () => { alive = false; };
   }, [selectedId]);
 
-  // Surface + locate a station selected from outside the map (ForecastView's risk
-  // table sets `selectedId` then routes here). The map opens country-wide, where
-  // it's clustered and the station isn't in `stations`, so `sel` can't resolve and
-  // the map doesn't move. Fetch the station's detail (API 13) → render the panel
-  // from it (selDetail fallback for `sel`) and fly to its coords past the cluster
-  // zoom so the viewport refetch loads the enriched marker. flownToRef makes this
-  // run once per selection.
-  //
-  // Keyed by `selectedId` ONLY (not `stations`): depending on `stations` re-ran the
-  // effect on every pan/initial-fetch, and its cleanup (`alive = false`) then
-  // cancelled the in-flight detail fetch just after flownToRef had already claimed
-  // the selection — so the remount early-returned and the fetch result was dropped,
-  // leaving the map un-flown with no panel (worse under StrictMode's double-invoke).
-  // We now read the "already in view" set via a ref and gate the async result on
-  // flownToRef instead of a cleanup flag, so the fetch always lands. setState stays
-  // in the resolved-promise callbacks.
+  // Locate a station selected from outside the map (e.g. ForecastView): fetch its
+  // detail (API 13) as the panel fallback and fly past the cluster zoom so the
+  // viewport refetch loads the enriched marker. Keyed by `selectedId` only and gated
+  // on flownToRef (not a cleanup flag) so depending on `stations` can't cancel the
+  // in-flight fetch mid-select. Runs once per selection.
   useEffect(() => {
     if (selectedId == null) {
       flownToRef.current = null;
@@ -444,8 +379,7 @@ export default function MapView() {
       return;
     }
     if (flownToRef.current === selectedId) return;
-    // Already in view (e.g. clicked a map marker) → the panel resolves from
-    // `stations`; no fetch/fly needed. Read via the ref so pan changes don't re-run.
+    // Already in view → the panel resolves from `stations`; no fetch/fly needed.
     if (stationsRef.current.some((s) => s.id === selectedId)) {
       flownToRef.current = selectedId;
       return;
@@ -463,21 +397,18 @@ export default function MapView() {
       .catch(() => { if (flownToRef.current === selectedId) setSelDetail(null); });
   }, [selectedId]);
 
-  // Province aggregate (API 37) for the selected station's province — the only
-  // series the scrubber shows. Keyed by province id, so it doesn't refire on pan;
-  // it also syncs the play timer to the province series' day count (5–7) and
-  // restarts at today. setState stays in the resolved-promise callbacks.
-  // The selected station: prefer the enriched viewport copy (has riskScore/weather),
-  // fall back to the fetched detail when it isn't in view yet (cross-view select).
+  // Selected station: prefer the enriched viewport copy, else the fetched detail.
   const selStation = stations.find((s) => s.id === selectedId) ?? (selDetail?.id === selectedId ? selDetail : null);
   const selProvinceId = selStation?.provinceId ?? null;
+  // Province aggregate (API 37) — the scrubber's series; also syncs the play timer's
+  // day count (5–7) and restarts at today. Keyed by province id so it doesn't refire on pan.
   useEffect(() => {
     let alive = true;
     if (selProvinceId == null) {
       Promise.resolve().then(() => {
         if (!alive) return;
         setProvForecast([]);
-        patch({ scrubDayCount: 7, scrubDay: 0 }); // back to the static placeholder scrubber
+        patch({ scrubDayCount: 7, scrubDay: 0 }); // static placeholder scrubber
       });
       return () => { alive = false; };
     }
@@ -495,10 +426,8 @@ export default function MapView() {
     return () => { alive = false; };
   }, [selProvinceId, patch]);
 
-  // Viewport search (API 30): debounced free-text query against the DB, scoped to
-  // the current rectangle. Replaces the old in-memory filter so search still works
-  // when the map is clustered (no individual stations loaded client-side). setState
-  // runs in the resolved-promise / timer callbacks.
+  // Viewport search (API 30): debounced free-text query against the DB, scoped to the
+  // current rectangle so it works even when clustered.
   useEffect(() => {
     const term = searchText.trim();
     if (term.length < 2) {
@@ -523,8 +452,7 @@ export default function MapView() {
     const map = mapRef.current;
     if (map && s.latitude != null && s.longitude != null) {
       map.flyTo([s.latitude, s.longitude], Math.max(map.getZoom(), 9), { duration: 0.8 });
-      // After the fly settles, briefly surface the station's hover tooltip (the
-      // dot is re-rendered once the viewport refetch lands at the new zoom).
+      // After the fly settles, surface the station's tooltip (re-rendered by the refetch).
       const m = markerByIdRef.current[s.id];
       if (m) setTimeout(() => m.openTooltip(), 800);
     }
@@ -542,15 +470,13 @@ export default function MapView() {
   const sel = selStation;
   const selMeta = sel ? riskMeta(sel.riskStatus) : null;
 
-  // Scrubber source: the selected station's province aggregate (API 37). Falls
-  // back to the static prototype bars when nothing live. Bar height ∝ rainfall.
+  // Scrubber source: the province aggregate (API 37), else static bars. Height ∝ rainfall.
   const activeSeries: ForecastPoint[] = provForecast;
   const scrubLive = activeSeries.length > 0;
   const scrubDays = scrubLive
     ? activeSeries.map((p) => ({ short: dayMonth(p.date), full: `${forecastDayLabel(p.date)} ${dayMonth(p.date)}`, height: rainBarHeight(p.rainfall) }))
     : SCRUB_HEIGHTS.map((h, i) => {
-        // Placeholder days track the real window today → today+6 (dates only, no data
-        // yet). Build the ISO from local parts to avoid a UTC day-shift in VN (UTC+7).
+        // Placeholder days today → today+6. Build ISO from local parts to avoid a UTC day-shift in VN.
         const d = new Date();
         d.setDate(d.getDate() + i);
         const pad = (n: number) => String(n).padStart(2, '0');
@@ -559,9 +485,7 @@ export default function MapView() {
       });
   const dayCount = scrubDays.length;
   const activeDay = Math.min(scrubDay, dayCount - 1);
-  // Full readout for the day under the scrubber cursor (live only).
   const activePoint = scrubLive ? activeSeries[activeDay] ?? null : null;
-  // Panel stat tiles follow the scrubber day + the active source.
   const dayPoint = activePoint ?? activeSeries[0] ?? null;
   const dayLabel = scrubLive ? scrubDays[activeDay]?.full ?? 'hôm nay' : 'hôm nay';
   const fieldChips = [

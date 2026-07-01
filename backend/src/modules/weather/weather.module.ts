@@ -30,10 +30,8 @@ import { GlofasProvider } from './providers/glofas.provider';
 import { GlofasService } from './glofas.service';
 
 /**
- * Group F — third-party weather integration (APIs 31–35). Registers the BullMQ
- * 'weather' queue (jobs retry 3× with backoff), the forecast/health provider
- * collections (ordered for the fallback chain), and the in-process worker.
- * Relies on the global RedisModule + EventBusModule.
+ * Group F — third-party weather integration (APIs 31–35): the BullMQ 'weather' queue
+ * (3× backoff retry), the ordered provider collections, and the worker.
  */
 @Module({
   imports: [
@@ -73,9 +71,8 @@ import { GlofasService } from './glofas.service';
     ReliefWebProvider,
     GlofasProvider,
     GlofasService,
-    // Ordered forecast fallback chain: Open-Meteo → MET Norway → WeatherAPI.
-    // MET Norway sits second — keyless + reachable where the others are blocked,
-    // so it catches when Open-Meteo is rate-limited/down before falling to WeatherAPI.
+    // Forecast fallback chain: Open-Meteo → MET Norway → WeatherAPI. MET Norway is
+    // second: keyless + reachable where the others are blocked.
     {
       provide: FORECAST_PROVIDERS,
       useFactory: (
@@ -85,9 +82,8 @@ import { GlofasService } from './glofas.service';
       ) => [om, met, wapi],
       inject: [OpenMeteoProvider, MetNorwayProvider, WeatherApiProvider],
     },
-    // Ordered disaster fallback chain: GDACS → ReliefWeb → EONET. ReliefWeb is
-    // skipped (isConfigured=false) until RELIEFWEB_APPNAME is set, so the chain
-    // currently falls GDACS → EONET in practice.
+    // Disaster fallback chain: GDACS → ReliefWeb → EONET (ReliefWeb skipped until
+    // RELIEFWEB_APPNAME is set, so effectively GDACS → EONET).
     {
       provide: DISASTER_PROVIDERS,
       useFactory: (
@@ -97,8 +93,7 @@ import { GlofasService } from './glofas.service';
       ) => [gdacs, reliefweb, eonet],
       inject: [GdacsProvider, ReliefWebProvider, EonetProvider],
     },
-    // All sources are healthchecked (API 35): forecast chain, then disaster chain,
-    // then GloFAS (river). GloFAS being DOWN is non-fatal — it runs on its own cron.
+    // All sources healthchecked (API 35): forecast + disaster + GloFAS.
     {
       provide: HEALTH_PROVIDERS,
       useFactory: (
@@ -121,10 +116,8 @@ import { GlofasService } from './glofas.service';
       ],
     },
   ],
-  // The ordered disaster fallback chain (GDACS → ReliefWeb → EONET) is reused by
-  // the events module's auto-ingestion pipeline (Group D), which reorders it to its
-  // own priority; export the token so it can inject it. GdacsProvider stays exported
-  // for backward compatibility.
+  // DISASTER_PROVIDERS is reused (and reordered) by Group D's event ingestion;
+  // GdacsProvider stays exported for backward compatibility.
   exports: [GdacsProvider, DISASTER_PROVIDERS],
 })
 export class WeatherModule {}

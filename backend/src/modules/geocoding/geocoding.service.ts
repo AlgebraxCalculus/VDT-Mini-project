@@ -3,21 +3,20 @@ import { ConfigService } from '@nestjs/config';
 import { RedisService } from '../../redis/redis.service';
 import { GeoMultiPolygon, GeoPolygon } from '../../common/types/geometry.types';
 
-/** Result of a reverse-geocode lookup (Vietnamese admin names, `null` over sea). */
+/** Reverse-geocode result (Vietnamese admin names, `null` over sea). */
 export interface GeocodeResult {
-  /** Xã / Phường (ward) — the telecom station naming unit. */
+  /** Xã / Phường (ward) — the station naming unit. */
   ward: string | null;
   /** Quận / Huyện (district). */
   district: string | null;
   /** Tỉnh / Thành phố (province). */
   province: string | null;
-  /** Full Nominatim display string, for logging/debugging. */
   displayName: string | null;
-  /** Admin boundary polygon of the matched object (SRID 4326), if any. */
+  /** Matched admin boundary (SRID 4326), if any. */
   polygon: GeoMultiPolygon | null;
 }
 
-/** Shape of the bits of the Nominatim `/reverse` response we read. */
+/** The Nominatim `/reverse` fields we read. */
 interface NominatimReverse {
   display_name?: string;
   address?: Record<string, string>;
@@ -27,19 +26,14 @@ interface NominatimReverse {
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
- * Reverse-geocoding over OpenStreetMap Nominatim — turns a coordinate into its
- * Vietnamese ward / district / province names plus the matched admin polygon.
- *
- * Used to (a) name telecom stations by their ward ("Trạm Đông Hà") and (b) build
- * a real province boundary when a station falls outside the seeded provinces (see
+ * Reverse-geocoding over OSM Nominatim: a coordinate → Vietnamese ward/district/
+ * province names + the matched admin polygon. Used to name stations by ward and to
+ * build a province boundary when a station falls outside the seeded provinces (see
  * {@link ProvinceResolverService}).
  *
- * Two guards keep us within Nominatim's usage policy and fast on repeats:
- *   - **Rate limit**: calls are serialized with a minimum interval (default 1.1s,
- *     the public server's ≤1 req/s rule). Point `NOMINATIM_URL` at a self-hosted
- *     instance to lift this for the 10k backfill.
- *   - **Cache**: every result (including sea = `null`) is cached in Redis keyed by
- *     coordinate, so re-runs and duplicate points cost nothing.
+ * Two guards: calls are serialized to `rateLimitMs` (Nominatim's ≤1 req/s; point
+ * `NOMINATIM_URL` at a self-hosted instance to lift it), and every result (sea
+ * included) is cached in Redis by coordinate.
  */
 @Injectable()
 export class GeocodingService {
@@ -53,7 +47,7 @@ export class GeocodingService {
   private readonly timeoutMs: number;
   private readonly cacheTtlS: number;
 
-  /** Serializes network calls so we never exceed the configured rate. */
+  /** Serializes network calls to stay within the configured rate. */
   private gate: Promise<unknown> = Promise.resolve();
   private lastCallAt = 0;
 
@@ -85,9 +79,8 @@ export class GeocodingService {
   }
 
   /**
-   * Reverse-geocode a coordinate. Returns the admin names + polygon, or `null`
-   * when Nominatim has no match (sea / outside coverage). Cache hits skip the
-   * rate limiter entirely.
+   * Reverse-geocode a coordinate → admin names + polygon, or `null` on no match
+   * (sea / outside coverage). Cache hits skip the rate limiter.
    */
   async reverse(lat: number, lng: number): Promise<GeocodeResult | null> {
     const key = `geocode:rev:${lat.toFixed(4)}:${lng.toFixed(4)}`;
@@ -201,6 +194,6 @@ export class GeocodingService {
     if (geo.type === 'Polygon') {
       return { type: 'MultiPolygon', coordinates: [(geo as GeoPolygon).coordinates] };
     }
-    return null; // Point / LineString → not a usable province boundary
+    return null; // Point / LineString → not a usable boundary
   }
 }

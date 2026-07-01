@@ -7,15 +7,11 @@ import { WeatherSource } from './entities/weather-snapshot.entity';
 import { GlofasProvider, RiverTarget } from './providers/glofas.provider';
 
 /**
- * Daily GloFAS driver. Pulls river discharge once per day from Copernicus EWDS
- * (the reachable replacement for the blocked Open-Meteo Flood API) and writes it
- * into the latest forecast snapshot's `weather_forecasts.river_water_level`, then
- * republishes WEATHER_SNAPSHOT so the Risk Engine recomputes WITH river data.
- *
- * Runs on its own daily cadence — GloFAS updates once/day, unlike the hourly
- * weather chain. Skipped when EWDS_PAT is unset. The GRIB→station extraction runs
- * via a Python sidecar (cfgrib, installed in the image; see scripts/). Raw discharge
- * (m³/s) is converted to a water-level stage (m) per station before persisting (see
+ * Daily GloFAS driver. Pulls river discharge once/day from Copernicus EWDS, writes
+ * it into the latest forecast snapshot's `weather_forecasts.river_water_level`, and
+ * republishes WEATHER_SNAPSHOT so the Risk Engine recomputes with river data.
+ * Skipped when EWDS_PAT is unset. GRIB→station extraction runs via a Python sidecar
+ * (cfgrib); discharge (m³/s) is converted to a stage (m) per station (see
  * {@link dischargeToLevels}) so it's comparable to flood_thresholds.
  */
 @Injectable()
@@ -23,16 +19,11 @@ export class GlofasService {
   private readonly logger = new Logger(GlofasService.name);
 
   /**
-   * Stage–discharge ("rating curve") tuning. GloFAS yields river DISCHARGE (m³/s)
-   * but flood_thresholds are water-level STAGES (m) with a per-station datum, so a
-   * raw m³/s-vs-m comparison is meaningless. We convert discharge → a stage on each
-   * station's OWN meter scale, self-anchored to that cell's baseline flow:
-   *   ratio = Q_day / Q_baseline   (baseline = the cell's lowest flow in the window)
-   *   onset  → maps to BĐ1 (tier-1 threshold)
-   *   danger → maps to the top tier (BĐ3)
-   * log-linear in between. This needs zero DB change and is magnitude-independent
-   * (a big river and a small stream are each judged against their own normal flow).
-   * Real per-station accuracy would need calibrated rating curves from KTTV/NCHMF.
+   * Rating-curve tuning. GloFAS gives discharge (m³/s) but thresholds are stages (m),
+   * so discharge is mapped to a stage on each station's own scale, self-anchored to
+   * the cell's baseline flow: ratio = Q_day / Q_baseline, onset → BĐ1, danger → top
+   * tier, log-linear between. Magnitude-independent; real accuracy needs calibrated
+   * KTTV/NCHMF curves.
    */
   private readonly onsetRatio: number;
   private readonly dangerRatio: number;
@@ -59,7 +50,7 @@ export class GlofasService {
     }
   }
 
-  /** Orchestrate one pull → DB enrichment → recompute trigger. Returns #stations enriched. */
+  /** One pull → DB enrichment → recompute trigger. Returns #stations enriched. */
   async run(): Promise<number> {
     if (!this.glofas.isConfigured()) {
       this.logger.warn('GloFAS skipped: EWDS_PAT not configured');
@@ -77,15 +68,14 @@ export class GlofasService {
 
     const byStation = await this.glofas.fetchRiverDischarge(targets);
     if (byStation.size === 0) {
-      // Reachable + downloaded, but extraction produced nothing (sidecar gap).
+      // Downloaded but extraction produced nothing (sidecar gap).
       this.logger.warn(
         'GloFAS: 0 stations enriched (GRIB extraction sidecar unavailable — see note.txt)',
       );
       return 0;
     }
 
-    // Convert raw discharge (m³/s) → water-level stage (m) on each station's own
-    // threshold scale before writing, so it's comparable to flood_thresholds.
+    // Convert discharge → per-station stage so it's comparable to flood_thresholds.
     const tiersByStation = await this.loadThresholds([...byStation.keys()]);
     const levelsByStation = this.dischargeToLevels(byStation, tiersByStation);
 
@@ -94,8 +84,7 @@ export class GlofasService {
       `GloFAS: river levels written for ${enriched} stations on snapshot ${snapshotId}`,
     );
 
-    // Republish so the Risk Engine recomputes with the new river data. Use a
-    // forecast source code so the engine doesn't skip it as a disaster snapshot.
+    // Republish under a forecast source code so the engine doesn't skip it as a disaster.
     await this.eventBus.publish(EVENT_CHANNELS.WEATHER_SNAPSHOT, {
       snapshotId,
       sourceCode: WeatherSource.OPEN_METEO,
@@ -127,7 +116,7 @@ export class GlofasService {
     }));
   }
 
-  /** Load ascending flood-threshold tiers (m) per station, for the stage mapping. */
+  /** Ascending flood-threshold tiers (m) per station, for the stage mapping. */
   private async loadThresholds(
     stationIds: number[],
   ): Promise<Map<number, number[]>> {
@@ -150,10 +139,9 @@ export class GlofasService {
   }
 
   /**
-   * Convert each station's discharge series (m³/s) → water-level stage (m) on that
-   * station's own threshold scale (see the rating-curve note on this class). Stations
-   * with no configured tiers are dropped: the engine ignores river for them anyway
-   * (riverIndex/hardGate need tiers), so writing a stage would be meaningless.
+   * Convert each station's discharge series → stage on its own threshold scale (see
+   * the class rating-curve note). Tier-less stations are dropped — the engine ignores
+   * river for them anyway.
    */
   private dischargeToLevels(
     byStation: Map<number, { date: string; discharge: number }[]>,
@@ -172,7 +160,7 @@ export class GlofasService {
       const tTop = tiers[tiers.length - 1];
       const band = tTop > t1 ? tTop - t1 : this.defaultBandM;
 
-      // Baseline = the cell's lowest flow over the forecast window (~normal flow).
+      // Baseline = the cell's lowest flow over the window (~normal flow).
       const baseline = Math.max(
         Math.min(...series.map((d) => d.discharge)),
         1e-6,
@@ -192,9 +180,8 @@ export class GlofasService {
   }
 
   /**
-   * Set river_water_level on the snapshot's hourly rows by date, in one set-based
-   * UPDATE via unnest arrays (10k stations × ~7 days is far too many for per-row
-   * queries). Returns the number of distinct stations touched.
+   * Set river_water_level by date in one set-based UPDATE via unnest arrays (10k
+   * stations × ~7 days is too many for per-row queries). Returns #stations touched.
    */
   private async applyRiverLevels(
     snapshotId: string,

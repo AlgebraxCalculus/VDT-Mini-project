@@ -7,23 +7,15 @@ import { MapEventsDto } from './dto/map-events.dto';
 import { MapWeatherDto, WeatherLayer } from './dto/map-weather.dto';
 import { MapSearchDto } from './dto/map-search.dto';
 
-/**
- * Zoom below which {@link MapService.getStations} clusters. The country view
- * (~zoom 6 for Vietnam) clusters; panning in (zoom 8+) reveals individual,
- * clickable station dots. Matches the design's "gộp marker khi zoom-out".
- * Kept low enough that users reach clickable dots quickly (the map's cluster
- * click flies to ≥ 9, always above this threshold).
- */
+/** Below this zoom {@link MapService.getStations} clusters ("gộp marker khi zoom-out"). */
 const CLUSTER_ZOOM_THRESHOLD = 8;
 
 /** Horizon (days) for the peak-risk lookup attached to map stations. */
 const RISK_WINDOW_DAYS = 7;
 
 /**
- * A station point for the map: a Group C station shape (province nested, geom
- * dropped) enriched with its peak risk over the window + a light forecast
- * snapshot. Deliberately mirrors the frontend `Station` type so the existing map
- * rendering consumes it without reshaping (thresholds kept as [] for type parity).
+ * A map station point: a Group C station enriched with peak risk + a light forecast.
+ * Mirrors the frontend `Station` type (thresholds kept [] for parity).
  */
 export interface MapStation {
   id: number;
@@ -67,7 +59,7 @@ export interface MapEvent {
   affectedArea: GeoPolygon | GeoMultiPolygon | null;
 }
 
-/** One weather-overlay sample (API 29). value unit depends on the layer. */
+/** One weather-overlay sample; value unit depends on the layer. */
 export interface WeatherOverlayPoint {
   lat: number;
   lng: number;
@@ -81,19 +73,15 @@ export interface WeatherOverlayResult {
 }
 
 /**
- * Group E — Map / GIS by viewport BBOX (APIs 27–30). Every query is read-only and
- * spatial: stations/events/weather are filtered to the on-screen rectangle via the
- * GIST index (ST_MakeEnvelope/ST_Contains), so payloads stay viewport-scoped. All
- * geometry work is raw PostGIS through the injected DataSource (never round-tripped
- * through the ORM), matching the project's spatial convention.
+ * Group E — Map / GIS by viewport BBOX (APIs 27–30). Read-only, spatial queries
+ * filtered to the on-screen rectangle via the GIST index (ST_MakeEnvelope/ST_Contains).
+ * All geometry is raw PostGIS through the injected DataSource, never the ORM.
  */
 @Injectable()
 export class MapService {
   constructor(private readonly dataSource: DataSource) {}
 
-  // ---------------------------------------------------------------------------
-  // API 27 — GET /map/stations (stations + risk, clustered when zoomed out).
-  // ---------------------------------------------------------------------------
+  // --- API 27 — GET /map/stations (stations + risk, clustered when zoomed out) ---
 
   async getStations(dto: MapStationsDto): Promise<MapStationsResult> {
     const { minLng, minLat, maxLng, maxLat, zoom, riskStatus, limit } = dto;
@@ -122,9 +110,8 @@ export class MapService {
   }
 
   /**
-   * Aggregate in-view stations into grid cells. The cell size scales with zoom so
-   * a cell stays a stable fraction of the screen. No per-station LATERAL here
-   * (kept cheap): the cluster colour is the worst cached `risk_status` in the cell.
+   * Aggregate in-view stations into grid cells whose size scales with zoom. Cluster
+   * colour = worst cached `risk_status` in the cell (no per-station LATERAL, stays cheap).
    */
   private async clusterStations(
     minLng: number,
@@ -134,7 +121,7 @@ export class MapService {
     zoom: number,
     riskStatus?: RiskStatus,
   ): Promise<MapCluster[]> {
-    // 3 cells per slippy tile at this zoom → a few hundred metres … tens of km.
+    // 3 cells per slippy tile at this zoom.
     const cell = 360 / Math.pow(2, zoom) / 3;
     const rows = await this.dataSource.query<
       { lng: number; lat: number; count: number; worst_rank: number }[]
@@ -170,9 +157,7 @@ export class MapService {
     }));
   }
 
-  // ---------------------------------------------------------------------------
-  // API 30 — GET /map/stations/search (free-text + risk filter in viewport).
-  // ---------------------------------------------------------------------------
+  // --- API 30 — GET /map/stations/search (free-text + risk filter in viewport) ---
 
   getSearch(dto: MapSearchDto): Promise<MapStation[]> {
     return this.queryStations({
@@ -187,16 +172,12 @@ export class MapService {
   }
 
   /**
-   * Shared station query backing API 27 (individual mode) and API 30 (search):
-   * in-view stations enriched with peak risk over the window + the nearest forecast
-   * row of the latest snapshot. Free-text `q` spans name/province/code.
+   * Shared station query for API 27 (individual mode) and API 30 (search): in-view
+   * stations enriched with peak risk + the nearest forecast row. `q` spans name/province/code.
    *
-   * Performance: the bbox-filtered stations are capped to `limit` FIRST (in the
-   * `inview` CTE, ordered by the cheap cached `risk_status`), so the risk/forecast
-   * enrichment runs only over the rows actually returned — not every station in a
-   * wide viewport. Enrichment is two DISTINCT ON CTEs hash-joined to `inview`, not a
-   * per-row LATERAL (the LATERAL form re-scanned the 10M-row forecast table per
-   * station and was multi-second; see the same CTE-over-LATERAL note in Reports).
+   * The `inview` CTE caps to `limit` FIRST (ordered by cached risk_status), so the two
+   * DISTINCT ON enrichment CTEs run only over returned rows — a per-station LATERAL
+   * re-scanned the 10M-row forecast table and was multi-second.
    */
   private async queryStations(opts: {
     minLng: number;
@@ -210,8 +191,7 @@ export class MapService {
     const { from, to } = this.riskWindow();
     const snapshotId = await this.latestForecastSnapshotId();
 
-    // Positional params: $1-4 bbox, $5 from, $6 to, $7 snapshotId, $8 limit,
-    // then optional $9 riskStatus / $10 q-term appended in order.
+    // $1-4 bbox, $5 from, $6 to, $7 snapshotId, $8 limit, then optional riskStatus/q.
     const params: unknown[] = [
       opts.minLng,
       opts.minLat,
@@ -294,16 +274,12 @@ export class MapService {
     return rows.map(toMapStation);
   }
 
-  // ---------------------------------------------------------------------------
-  // API 28 — GET /map/events (active events + affected polygon in viewport).
-  // ---------------------------------------------------------------------------
+  // --- API 28 — GET /map/events (active events + affected polygon in viewport) ---
 
   /**
    * Events whose scope intersects the viewport, with a drawable footprint: the
-   * union of the event's `event_provinces.affected_area` polygons (frozen at
-   * assignment), simplified for transport. For province-only scopes (affected_area
-   * NULL) it falls back to the union of the in-scope province boundaries so the
-   * map still has something to draw.
+   * simplified union of `event_provinces.affected_area`, falling back to the in-scope
+   * province boundaries when affected_area is NULL.
    */
   async getEvents(dto: MapEventsDto): Promise<MapEvent[]> {
     const { minLng, minLat, maxLng, maxLat, status } = dto;
@@ -387,9 +363,7 @@ export class MapService {
     }));
   }
 
-  // ---------------------------------------------------------------------------
-  // API 29 — GET /map/weather (forecast field overlay in viewport).
-  // ---------------------------------------------------------------------------
+  // --- API 29 — GET /map/weather (forecast field overlay in viewport) ---
 
   async getWeatherOverlay(dto: MapWeatherDto): Promise<WeatherOverlayResult> {
     const { minLng, minLat, maxLng, maxLat, layer } = dto;
@@ -430,11 +404,9 @@ export class MapService {
     return { layer, snapshotId, points };
   }
 
-  // ---------------------------------------------------------------------------
-  // Helpers.
-  // ---------------------------------------------------------------------------
+  // --- Helpers ---
 
-  /** Latest SUCCESS forecast snapshot (excludes the disaster sources). */
+  /** Latest SUCCESS forecast snapshot (excludes disaster sources). */
   private async latestForecastSnapshotId(): Promise<string | null> {
     const rows = await this.dataSource.query<{ id: string }[]>(
       `SELECT id FROM weather_snapshots
@@ -445,7 +417,7 @@ export class MapService {
     return rows[0]?.id ?? null;
   }
 
-  /** [today, today+7] as YYYY-MM-DD — the window the peak-risk lookup scans. */
+  /** [today, today+7] as YYYY-MM-DD for the peak-risk lookup. */
   private riskWindow(): { from: string; to: string } {
     const today = new Date();
     const end = new Date(today);

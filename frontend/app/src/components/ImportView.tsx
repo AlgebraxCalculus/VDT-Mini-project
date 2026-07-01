@@ -29,8 +29,7 @@ export default function ImportView() {
   const { state, patch, showToast, resetImport } = useApp();
   const { importStep, importProgress } = state;
 
-  // Local import session (not in global AppState): the chosen file, its client
-  // preview, the running job id, and the final report.
+  // Local import session: the chosen file, its preview, the job id, and the report.
   const [file, setFile] = useState<File | null>(null);
   const [preview, setPreview] = useState<PreviewResult | null>(null);
   const [jobId, setJobId] = useState<string | null>(null);
@@ -89,8 +88,7 @@ export default function ImportView() {
       .finally(() => setUploading(false));
   };
 
-  // API 19 — poll the job while it runs; update progress, capture the report on
-  // completion. setState lives in the interval callback (not the effect body).
+  // API 19 — poll the job, updating progress and capturing the report on completion.
   useEffect(() => {
     if (!jobId || importStep !== 3) return;
     let alive = true;

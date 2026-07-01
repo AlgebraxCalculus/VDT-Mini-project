@@ -33,7 +33,7 @@ export interface Paginated<T> {
   size: number;
 }
 
-/** One aggregated point in a forecast time-series (province or station). */
+/** One aggregated point in a forecast time-series. */
 export interface ForecastPoint {
   date: string;
   temperature: number | null;
@@ -43,7 +43,7 @@ export interface ForecastPoint {
   riverWaterLevel: number | null;
 }
 
-/** A station forecast point enriched with the day's risk classification (API 38). */
+/** A forecast point enriched with the day's risk classification. */
 export interface ClassifiedForecastPoint extends ForecastPoint {
   severity: RiskVerdict['severity'];
   alertLevel: number;
@@ -52,16 +52,14 @@ export interface ClassifiedForecastPoint extends ForecastPoint {
 }
 
 /**
- * Group G read side (APIs 36–39). Every endpoint is read-only and queries the
- * pre-computed tables the {@link RiskEngineService} writes — risk is never
- * computed on the request path. The one exception is API 38, which classifies the
- * forecast series on the fly purely for display (no persistence).
+ * Group G read side (APIs 36–39). Read-only queries over the tables the
+ * {@link RiskEngineService} writes; risk is never computed on the request path.
+ * Exception: API 38 classifies the forecast series on the fly, display-only.
  */
 @Injectable()
 export class RiskService {
-  // Per-group hazard weights, resolved from the same env vars as the write-side
-  // Risk Engine so API 38's on-the-fly classification matches the pre-computed
-  // table. The group (river-monitored vs rain-only) is picked per station below.
+  // Same env as the write-side engine so API 38's on-the-fly classification matches
+  // the pre-computed table; the group is picked per station below.
   private readonly weightProfiles: RiskWeightProfiles;
 
   constructor(
@@ -81,15 +79,11 @@ export class RiskService {
     ).profiles;
   }
 
-  // ---------------------------------------------------------------------------
-  // API 36 — GET /risk/stations
-  // ---------------------------------------------------------------------------
+  // --- API 36 — GET /risk/stations ---
 
   /**
-   * Paginated at-risk stations over the forecast window. Scans
-   * station_risk_assessments (index: station_id+forecast_date, severity) joined to
-   * the station for its name/province. Defaults to the 5–7 day window and excludes
-   * LOW unless a specific severity is requested.
+   * Paginated at-risk stations over the forecast window from station_risk_assessments.
+   * Defaults to the 5–7 day window and excludes LOW unless a severity is requested.
    */
   async findRiskStations(
     query: QueryRiskStationsDto,
@@ -108,8 +102,7 @@ export class RiskService {
     if (query.severity) {
       qb.andWhere('a.severity = :severity', { severity: query.severity });
     } else if (!query.includeLow) {
-      // "Danh sách trạm nguy cơ" → only stations that are actually at risk.
-      // `includeLow=true` opts out to return the full set (incl. LOW).
+      // At-risk only; includeLow=true returns the full set.
       qb.andWhere("a.severity <> 'LOW'");
     }
     if (query.provinceId !== undefined) {
@@ -131,14 +124,11 @@ export class RiskService {
     return { data, total, page: query.page, size: query.size };
   }
 
-  // ---------------------------------------------------------------------------
-  // API 37 — GET /forecasts/provinces/{id}
-  // ---------------------------------------------------------------------------
+  // --- API 37 — GET /forecasts/provinces/{id} ---
 
   /**
-   * Province-level forecast time-series, aggregated from the latest snapshot's
-   * station forecasts in that province (avg temp/rain/wind/river per day). Falls
-   * back to province-centroid rows if no station-level data exists.
+   * Province forecast time-series, averaged per day from the latest snapshot's
+   * station forecasts, falling back to province-centroid rows.
    */
   async getProvinceForecast(
     provinceId: number,
@@ -170,7 +160,7 @@ export class RiskService {
     );
 
     if (series.length === 0) {
-      // Province-centroid rows (station_id NULL) if station-level data is absent.
+      // Fall back to province-centroid rows (station_id NULL).
       series = await this.aggregateForecast(
         `SELECT (forecast_time)::date AS date,
                 AVG(temperature)       AS temperature,
@@ -190,14 +180,11 @@ export class RiskService {
     return { provinceId, from, to, series };
   }
 
-  // ---------------------------------------------------------------------------
-  // API 38 — GET /forecasts/stations/{id}
-  // ---------------------------------------------------------------------------
+  // --- API 38 — GET /forecasts/stations/{id} ---
 
   /**
-   * Station-level forecast time-series with each day classified against the
-   * station's flood thresholds (same four-layer model as the engine). The
-   * classification here is display-only — it is not persisted.
+   * Station forecast time-series, each day classified against the station's flood
+   * thresholds (the engine's four-layer model). Display-only, not persisted.
    */
   async getStationForecast(
     stationId: number,
@@ -265,11 +252,9 @@ export class RiskService {
     return { stationId, from, to, series };
   }
 
-  // ---------------------------------------------------------------------------
-  // API 39 — GET /stations/{id}/alert-history
-  // ---------------------------------------------------------------------------
+  // --- API 39 — GET /stations/{id}/alert-history ---
 
-  /** Paginated, newest-first alert history for a station (actual vs threshold + reason). */
+  /** Paginated, newest-first alert history for a station. */
   async getAlertHistory(
     stationId: number,
     query: QueryAlertHistoryDto,
@@ -286,11 +271,9 @@ export class RiskService {
     return { data, total, page: query.page, size: query.size };
   }
 
-  // ---------------------------------------------------------------------------
-  // Helpers
-  // ---------------------------------------------------------------------------
+  // --- Helpers ---
 
-  /** Default the date window to [today, today+7] when the client omits it. */
+  /** Default the date window to [today, today+7]. */
   private resolveWindow(
     from?: string,
     to?: string,
@@ -313,7 +296,7 @@ export class RiskService {
     return rows[0]?.id ?? null;
   }
 
-  /** Run an aggregation query and coerce the numeric/date columns to JS types. */
+  /** Run an aggregation query and coerce numeric/date columns to JS types. */
   private async aggregateForecast(
     sql: string,
     params: unknown[],

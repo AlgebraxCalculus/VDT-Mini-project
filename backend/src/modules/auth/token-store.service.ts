@@ -3,21 +3,18 @@ import { ConfigService } from '@nestjs/config';
 import { RedisService } from '../../redis/redis.service';
 
 /**
- * Tracks refresh-token validity and access-token invalidation cut-offs, backed
- * by Redis so the state is shared across every API/WebSocket instance.
+ * Refresh-token whitelist + per-user access-token invalidation epoch, in Redis so
+ * state is shared across every API/WebSocket instance. All keys expire after the
+ * refresh TTL. Bumping a user's epoch instantly kills all their live tokens (logout,
+ * role change, deactivate, delete).
  *
- * Keys (all expire after the refresh TTL — nothing outlives the longest token):
- *   - refresh:<jti>        -> userId         (rotation whitelist; one-time-use)
- *   - user:refresh:<uid>   -> SET of jtis    (so we can revoke all of a user's)
- *   - user:epoch:<uid>     -> unix seconds   (tokens with iat < epoch are dead)
- *
- * The public API mirrors the previous in-memory version but is now async (Redis
- * I/O). Bumping a user's epoch instantly kills all their live access + refresh
- * tokens — used on logout, role change, deactivate, and delete.
+ *   refresh:<jti>       -> userId       (rotation whitelist; one-time-use)
+ *   user:refresh:<uid>  -> SET of jtis  (to revoke all of a user's)
+ *   user:epoch:<uid>    -> unix seconds (tokens with iat < epoch are dead)
  */
 @Injectable()
 export class TokenStoreService {
-  /** Refresh TTL in seconds — the expiry applied to every key here. */
+  /** Refresh TTL (seconds) applied to every key here. */
   private readonly ttlSeconds: number;
 
   constructor(
@@ -68,10 +65,7 @@ export class TokenStoreService {
     await pipeline.exec();
   }
 
-  /**
-   * Invalidate every token currently held by a user (logout-everywhere / role
-   * change). Sets the epoch to "now" and drops all their refresh tokens.
-   */
+  /** Invalidate all of a user's tokens: set the epoch to now and drop their refresh tokens. */
   async invalidateUser(userId: number): Promise<void> {
     const userKey = this.userRefreshKey(userId);
     const jtis = await this.redis.client.smembers(userKey);
@@ -86,11 +80,7 @@ export class TokenStoreService {
     await pipeline.exec();
   }
 
-  /**
-   * True if a token issued at `iat` is still honored (not pre-dating the user's
-   * last invalidation cut-off). Used by JwtStrategy on every authenticated call
-   * and by the WebSocket handshake.
-   */
+  /** True if a token issued at `iat` post-dates the user's last invalidation epoch. */
   async isTokenStillValid(userId: number, iat?: number): Promise<boolean> {
     const cutoff = await this.redis.client.get(this.epochKey(userId));
     if (cutoff === null) return true;
@@ -103,10 +93,7 @@ function nowSeconds(): number {
   return Math.floor(Date.now() / 1000);
 }
 
-/**
- * Parse a JWT-style duration ("900s", "15m", "1h", "7d", or a bare number of
- * seconds) into seconds. Falls back to 7 days on anything unrecognized.
- */
+/** Parse a JWT-style duration ("900s"/"15m"/"1h"/"7d"/bare seconds); 7d on garbage. */
 export function parseDurationSeconds(value: string): number {
   const trimmed = value.trim();
   const match = /^(\d+)\s*([smhd]?)$/i.exec(trimmed);

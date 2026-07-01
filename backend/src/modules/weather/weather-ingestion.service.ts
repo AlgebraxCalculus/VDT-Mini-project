@@ -47,11 +47,9 @@ interface ForecastInsert {
 }
 
 /**
- * Core weather ingestion, shared by the BullMQ processor (manual refresh + cron).
- * Resolves targets → fetches via the fallback chain Open-Meteo → MET Norway →
- * WeatherAPI → normalizes → persists snapshot + forecasts in one transaction → publishes
- * WEATHER_SNAPSHOT so the (future) Risk Engine recomputes. This is the producer
- * that was missing for the pre-declared WEATHER_SNAPSHOT channel.
+ * Core weather ingestion, shared by manual refresh + cron. Resolves targets →
+ * fetches via Open-Meteo → MET Norway → WeatherAPI → persists snapshot + forecasts
+ * in one transaction → publishes WEATHER_SNAPSHOT for the Risk Engine.
  */
 @Injectable()
 export class WeatherIngestionService {
@@ -85,9 +83,7 @@ export class WeatherIngestionService {
     return this.ingestForecast(opts);
   }
 
-  // ---------------------------------------------------------------------------
-  // Forecast path (Open-Meteo → MET Norway → WeatherAPI)
-  // ---------------------------------------------------------------------------
+  // --- Forecast path (Open-Meteo → MET Norway → WeatherAPI) ---
 
   private async ingestForecast(
     opts: IngestOptions,
@@ -113,8 +109,7 @@ export class WeatherIngestionService {
       const { result, source } = await this.fetchWithFallback(targets);
 
       await this.dataSource.transaction(async (manager) => {
-        // Plain insert shape (no relation/jsonb) — avoids the QueryDeepPartialEntity
-        // pitfall that the entity's `snapshot` relation would otherwise trigger.
+        // Plain insert shape (no relation/jsonb) avoids the QueryDeepPartialEntity pitfall.
         const rows: ForecastInsert[] = [];
         for (const s of result.series) {
           for (const p of s.points) {
@@ -156,7 +151,7 @@ export class WeatherIngestionService {
       this.logger.error(
         `Snapshot ${snapshot.id} failed: ${(err as Error).message}`,
       );
-      throw err; // let BullMQ retry
+      throw err; // BullMQ retries
     }
   }
 
@@ -182,10 +177,7 @@ export class WeatherIngestionService {
     throw new Error(`All forecast providers failed [${errors.join(' | ')}]`);
   }
 
-  // ---------------------------------------------------------------------------
-  // Disaster path — fallback chain GDACS → ReliefWeb → EONET. Stores the raw
-  // events on a snapshot tagged with whichever source succeeded.
-  // ---------------------------------------------------------------------------
+  // --- Disaster path (GDACS → ReliefWeb → EONET); stores raw events on the snapshot ---
 
   private async ingestDisaster(
     opts: IngestOptions,
@@ -240,47 +232,30 @@ export class WeatherIngestionService {
     throw new Error(`All disaster sources failed [${errors.join(' | ')}]`);
   }
 
-  // ---------------------------------------------------------------------------
-  // Helpers
-  // ---------------------------------------------------------------------------
+  // --- Helpers ---
 
   /**
    * Carry the most recent river_water_level into this fresh forecast snapshot.
    *
-   * GloFAS runs once/day and only enriches whatever snapshot was latest at its run
-   * time; every hourly forecast ingest in between creates a snapshot whose river
-   * column is NULL (forecast providers don't supply river). Left as-is that would
-   * collapse the Risk Engine's V index — and thus severity — back to LOW until the
-   * next GloFAS run. To avoid that *without a schema change*, copy the river stage
-   * from recent prior forecast snapshots that have river data, matched per station
-   * + calendar day. Runs inside the ingest transaction so the snapshot is never
-   * published river-less when carry-forward data exists; the next GloFAS run
-   * overwrites these carried values with fresh discharge-derived stages.
+   * Forecast providers don't supply river and GloFAS only enriches once/day, so an
+   * hourly snapshot's river column would be NULL — collapsing the Risk Engine's V
+   * index (and severity) to LOW until the next GloFAS run. To avoid that without a
+   * schema change, copy the stage from recent prior snapshots, matched per station +
+   * day, inside the ingest transaction. GloFAS later overwrites with fresh values.
+   * No-op with no prior river data; province rows (station_id NULL) aren't carried.
    *
-   * No-op when no prior river data exists yet. Province rows (station_id NULL) are
-   * not carried — GloFAS only enriches station rows.
-   *
-   * Two passes, both scanning a bounded recent window (not a single source
-   * snapshot):
-   *  1. Same-day copy: for each (station, calendar-day), take the value from the
-   *     newest prior snapshot that actually holds river for THAT day. Scanning per
-   *     day — rather than pinning one source snapshot — is what keeps the distinct
-   *     day-to-day forecast shape intact: when the immediately-prior snapshot came
-   *     from a short-horizon provider (e.g. WeatherAPI's ~3 days), a single-source
-   *     carry would leave the far days with no same-day match, and Pass 2 would then
-   *     smear one boundary value across the whole tail (today distinct, every future
-   *     day identical). Per-day lookup instead reaches back past the short-horizon
-   *     snapshot to the last 7-day one that still had that day.
-   *  2. Persistence fill: any day still NULL (genuinely beyond every prior river
-   *     horizon) inherits the station's last-known stage — its most recent value at
-   *     the latest forecast_time — so the far end never erodes back to NULL between
-   *     daily GloFAS runs.
+   * Two passes over a bounded recent window:
+   *  1. Same-day copy from the newest prior snapshot holding river for THAT day.
+   *     Per-day lookup (not one pinned source) preserves the day-to-day shape when a
+   *     short-horizon provider (e.g. WeatherAPI ~3 days) lacks the far days.
+   *  2. Persistence fill: days still NULL inherit the station's last-known stage so
+   *     the far end never erodes to NULL between daily GloFAS runs.
    */
   private async carryForwardRiver(
     manager: EntityManager,
     snapshotId: string,
   ): Promise<void> {
-    // Bail early if no prior forecast snapshot holds river data at all.
+    // Bail if no prior forecast snapshot holds river data.
     const src = await manager.query<{ snapshot_id: string }[]>(
       `SELECT prev.snapshot_id
          FROM weather_forecasts prev
@@ -292,12 +267,10 @@ export class WeatherIngestionService {
         LIMIT 1`,
       [snapshotId],
     );
-    if (!src[0]?.snapshot_id) return; // no prior river data yet — nothing to carry
+    if (!src[0]?.snapshot_id) return;
 
-    // Pass 1 — per (station, calendar-day) copy from the newest prior snapshot that
-    // has river for that day. The 3-day lookback + forecast_time >= today bound the
-    // scan; DISTINCT ON keeps only the freshest value per day, skipping any
-    // short-horizon (e.g. WeatherAPI) snapshot that lacks the far days.
+    // Pass 1 — per (station, day) copy from the newest prior snapshot with river for
+    // that day. DISTINCT ON keeps the freshest value per day; 3-day lookback bounds the scan.
     await manager.query(
       `UPDATE weather_forecasts cur
           SET river_water_level = src.level
@@ -323,8 +296,7 @@ export class WeatherIngestionService {
       [snapshotId],
     );
 
-    // Pass 2 — persistence fill for days no prior snapshot ever covered: each
-    // station's last-known stage (newest snapshot, latest forecast_time).
+    // Pass 2 — persistence fill: uncovered days inherit each station's last-known stage.
     await manager.query(
       `UPDATE weather_forecasts cur
           SET river_water_level = last.level
@@ -373,7 +345,7 @@ export class WeatherIngestionService {
     }
 
     if (opts.provinceIds?.length) {
-      // Centroid lives in a geometry column; read lat/lng via PostGIS.
+      // Centroid is a geometry column; read lat/lng via PostGIS.
       const rows = await this.dataSource.query<
         { id: number; lat: number | null; lng: number | null }[]
       >(
@@ -397,9 +369,8 @@ export class WeatherIngestionService {
   }
 
   /**
-   * Keep raw_payload bounded — store a sample, not megabytes of time-series.
-   * Returns `any`: TypeORM's QueryDeepPartialEntity mishandles the nullable
-   * jsonb union, so a precise type can't be assigned into the update payload.
+   * Keep raw_payload bounded — a sample, not megabytes. Returns `any` because
+   * TypeORM's QueryDeepPartialEntity mishandles the nullable jsonb union.
    */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   private trimRaw(raw: unknown): any {

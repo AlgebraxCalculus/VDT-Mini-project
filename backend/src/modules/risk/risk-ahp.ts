@@ -1,27 +1,17 @@
 /**
- * Analytic Hierarchy Process (Saaty, 1980) — a small, pure, dependency-free
- * implementation used to *derive* the hazard weights from explicit pairwise
- * importance judgments instead of hand-picked constants.
+ * Analytic Hierarchy Process (Saaty, 1980) — a pure, dependency-free engine that
+ * derives hazard weights from an interpretable judgment ("river stage is ~N× as
+ * important as rainfall") instead of magic constants, with a consistency check.
+ * Generic over criteria count, so sub-criteria can be added later.
  *
- * Why AHP here: the rain/river hazard weights used to be magic numbers (0.4/0.6).
- * AHP lets us instead state an interpretable domain judgment — "the river stage is
- * ~N times as important as local rainfall for flooding" — and mechanically derive
- * normalized weights that are *consistency-checked*. The engine is generic (works
- * for any number of criteria) so elevation or rainfall sub-criteria can later be
- * folded in as a proper hierarchy without changing the math.
- *
- * Pipeline: pairwise judgments → reciprocal matrix → priority vector (row
- * geometric mean, the standard AHP approximation, exact for consistent matrices)
- * → consistency check (λmax → CI → CR against Saaty's Random Index). CR < 0.10 is
- * Saaty's acceptance threshold; a 1- or 2-criteria matrix is consistent by
- * construction (CR = 0).
+ * Pipeline: judgments → reciprocal matrix → priority vector (row geometric mean) →
+ * consistency (λmax → CI → CR vs Saaty's RI). CR < 0.10 is accepted; a 1–2 criteria
+ * matrix is consistent by construction (CR = 0).
  */
 
 /**
- * Saaty's 1–9 fundamental scale with its verbal anchors. A judgment `a(i,j)` on
- * this scale means "criterion i is <anchor> more important than criterion j";
- * the reverse comparison is its reciprocal. Intermediate values (2,4,6,8) and
- * fractions are permitted — the scale is guidance, not a hard enum.
+ * Saaty's 1–9 scale: `a(i,j)` means "i is <anchor> more important than j", the
+ * reverse being its reciprocal. Intermediate values and fractions are allowed.
  */
 export const SAATY = {
   EQUAL: 1,
@@ -35,11 +25,7 @@ export const SAATY = {
   EXTREME: 9,
 } as const;
 
-/**
- * Saaty's Random Index (RI): the average consistency index of large samples of
- * randomly generated reciprocal matrices, indexed by matrix order n. Used to
- * normalize CI into the scale-free CR. Orders 1–2 are always consistent (RI = 0).
- */
+/** Saaty's Random Index by matrix order n; normalizes CI into the scale-free CR. */
 const RANDOM_INDEX: Record<number, number> = {
   1: 0,
   2: 0,
@@ -53,38 +39,31 @@ const RANDOM_INDEX: Record<number, number> = {
   10: 1.49,
 };
 
-/** Saaty's acceptance threshold: judgments with CR below this are "consistent enough". */
+/** Saaty's acceptance threshold: CR below this is consistent enough. */
 export const MAX_ACCEPTABLE_CR = 0.1;
 
-/** A square reciprocal pairwise-comparison matrix; `m[i][j]` = importance of i over j. */
+/** Square reciprocal matrix; `m[i][j]` = importance of i over j. */
 export type PairwiseMatrix = number[][];
 
-/** One pairwise judgment for the upper triangle: criterion `i` is `a`× as important as `j`. */
+/** One upper-triangle judgment: criterion `i` is `a`× as important as `j`. */
 export interface Judgment {
   i: number;
   j: number;
   a: number;
 }
 
-/** Outcome of one AHP run over a criteria set. */
 export interface AhpResult {
-  /** Priority vector (criterion weights); sums to 1, same order as the matrix. */
+  /** Priority vector (criterion weights); sums to 1. */
   weights: number[];
-  /** Principal eigenvalue estimate. */
   lambdaMax: number;
   /** Consistency Index = (λmax − n)/(n − 1). */
   ci: number;
   /** Consistency Ratio = CI / RI(n). */
   cr: number;
-  /** Whether CR is within Saaty's acceptance threshold. */
   consistent: boolean;
 }
 
-/**
- * Assemble an n×n reciprocal matrix from upper-triangle judgments. The diagonal is
- * 1; every stated `a(i,j)` sets its reciprocal `a(j,i) = 1/a` automatically, which
- * guarantees the matrix is reciprocal (a precondition of AHP).
- */
+/** Build an n×n reciprocal matrix from upper-triangle judgments (a(j,i) = 1/a). */
 export function reciprocalMatrix(n: number, judgments: Judgment[]): PairwiseMatrix {
   const m: PairwiseMatrix = Array.from({ length: n }, () =>
     Array.from({ length: n }, () => 1),
@@ -103,9 +82,8 @@ export function reciprocalMatrix(n: number, judgments: Judgment[]): PairwiseMatr
 }
 
 /**
- * Priority vector via the row geometric-mean method: w_i = geomean(row_i) then
- * normalize to sum 1. This is Saaty's recommended approximation of the principal
- * eigenvector and is exact when the matrix is perfectly consistent.
+ * Priority vector by row geometric mean (normalized to sum 1) — Saaty's principal-
+ * eigenvector approximation, exact for a consistent matrix.
  */
 export function priorityVector(m: PairwiseMatrix): number[] {
   const n = m.length;
@@ -115,9 +93,8 @@ export function priorityVector(m: PairwiseMatrix): number[] {
 }
 
 /**
- * Consistency of a judgment matrix given its priority vector. λmax is estimated as
- * the mean of (A·w)_i / w_i; CI/CR follow Saaty. Falls back to the largest tabulated
- * RI for very large n (keeps CR defined rather than throwing).
+ * Consistency of a matrix given its priority vector: λmax = mean of (A·w)_i / w_i,
+ * then CI/CR per Saaty. Large n falls back to the largest tabulated RI.
  */
 export function consistency(
   m: PairwiseMatrix,
@@ -139,7 +116,7 @@ export function ahp(m: PairwiseMatrix): AhpResult {
   return { weights, lambdaMax, ci, cr, consistent };
 }
 
-/** Convenience: build the matrix from judgments and run AHP in one call. */
+/** Build the matrix from judgments and run AHP in one call. */
 export function ahpFromJudgments(n: number, judgments: Judgment[]): AhpResult {
   return ahp(reciprocalMatrix(n, judgments));
 }

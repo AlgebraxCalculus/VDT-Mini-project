@@ -17,13 +17,10 @@ export type MapLayout = 'A' | 'B' | 'C';
 /** Cached real-time risk state — mirrors backend RiskStatus enum. */
 export type RiskStatus = 'NORMAL' | 'WATCH' | 'WARNING' | 'DANGER';
 
-/**
- * Severity bucket of a single risk assessment — mirrors backend RiskSeverity.
- * Banded from risk_score (0–100): <30 LOW, <60 MEDIUM, ≥60 HIGH.
- */
+/** Severity of a risk assessment, banded from risk_score: <30 LOW, <60 MEDIUM, ≥60 HIGH. */
 export type RiskSeverity = 'LOW' | 'MEDIUM' | 'HIGH';
 
-/** Lightweight province reference (no boundary geometry — BE drops it). */
+/** Province reference (no boundary geometry). */
 export interface ProvinceRef {
   id: number;
   code: string;
@@ -37,11 +34,7 @@ export interface Threshold {
   label?: string | null;
 }
 
-/**
- * Per-station weather snapshot. NOT part of GET /stations — it comes from the
- * weather API. Optional so the Station shape mirrors the backend exactly; the
- * mock fills it so the existing UI keeps rendering before the merge.
- */
+/** Per-station weather snapshot (from the weather/map APIs, not GET /stations). */
 export interface StationWeather {
   temp: number;
   rain: number;
@@ -50,33 +43,26 @@ export interface StationWeather {
 }
 
 export interface Station {
-  // ── Returned by GET /stations (Group C contract) ──────────────────────
-  id: number; // numeric PK — use for CRUD URLs
-  stationCode: string; // human code, e.g. "VTS-QT-081"
+  // Returned by GET /stations (Group C):
+  id: number;
+  stationCode: string;
   name: string;
   latitude: number | null;
   longitude: number | null;
   elevation: number | null;
   provinceId: number | null;
-  province: ProvinceRef | null; // {id, code, name} — no boundary
-  riskStatus: RiskStatus | null; // enum, not a numeric score
-  thresholds: Threshold[]; // 0–3 tiers, must be read null-safe
-  // ── Enrichment: separate APIs at merge, mock-only for now ──────────────
-  weather?: StationWeather; // weather snapshot API
-  riskScore?: number; // 0–100 metric — station_risk_assessments.risk_score (Group G)
-  severity?: RiskSeverity; // peak severity in the forecast window (Group G)
+  province: ProvinceRef | null;
+  riskStatus: RiskStatus | null;
+  thresholds: Threshold[]; // 0–3 tiers, read null-safe
+  // Enrichment from separate APIs (weather/map/Group G):
+  weather?: StationWeather;
+  riskScore?: number; // 0–100
+  severity?: RiskSeverity; // peak severity in the window
 }
 
-// ───────────────────────────────────────────────────────────────────────────
-// Group G — Risk & forecast read side (APIs 36–39). These mirror the backend
-// response shapes exactly so the mock can be swapped for the real API at merge.
-// ───────────────────────────────────────────────────────────────────────────
+// --- Group G — Risk & forecast read side (APIs 36–39) ---
 
-/**
- * One row of GET /risk/stations (API 36): a pre-computed assessment for a
- * station on a single forecast day, joined to its station/province. risk_score
- * is 0–100; eventId is a BIGINT string (or null).
- */
+/** One row of GET /risk/stations (API 36): a pre-computed per-day assessment + station. */
 export interface RiskAssessment {
   id: string;
   stationId: number;
@@ -133,14 +119,13 @@ export interface Account {
 }
 
 export interface StationDrawerForm {
-  id: number | null; // numeric PK when editing; null when adding
+  id: number | null; // null when adding
   stationCode: string;
   name: string;
   lat: string;
   lng: string;
   elevation: string;
-  // Province is auto-assigned server-side via ST_Contains — not entered here.
-  // No operational status field: the backend stations table has none.
+  // Province is auto-assigned server-side; no status field on the backend table.
   th1: string;
   th2: string;
   th3: string;

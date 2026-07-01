@@ -1,19 +1,17 @@
 import { ReportFormat } from './reports.constants';
 
-/** A renderable cell value — coerced to a display string by the renderers. */
+/** A renderable cell value. */
 export type Cell = string | number | null | undefined;
 
-/** One labelled KPI shown above the table (e.g. severity counts). */
+/** One labelled KPI shown above the table. */
 export interface SummaryStat {
   label: string;
   value: string | number;
 }
 
 /**
- * Format-agnostic report model the processor builds per {@link ReportKind}. The
- * two renderers below turn it into CSV (data) or a print-ready HTML document
- * (browser → PDF). Keeping this neutral means a new format is one more renderer,
- * not a rewrite of the query layer.
+ * Format-agnostic report model the processor builds; the renderers below turn it
+ * into CSV or print-ready HTML. A new format is one more renderer, not a query rewrite.
  */
 export interface ReportTable {
   title: string;
@@ -26,9 +24,7 @@ export interface ReportTable {
 
 const cellText = (c: Cell): string => (c === null || c === undefined ? '' : String(c));
 
-// ---------------------------------------------------------------------------
-// CSV
-// ---------------------------------------------------------------------------
+// --- CSV ---
 
 /** Quote a field only when it contains a comma, quote, or newline (RFC 4180). */
 function csvField(value: Cell): string {
@@ -39,11 +35,7 @@ function csvField(value: Cell): string {
 
 const csvRow = (cells: Cell[]): string => cells.map(csvField).join(',');
 
-/**
- * Render to CSV with a small human header (title + timestamp + KPIs), a blank
- * line, then the data table. A leading BOM makes Excel open UTF-8 (Vietnamese)
- * correctly.
- */
+/** Render to CSV (header + KPIs + table). Leading BOM so Excel reads UTF-8 (Vietnamese). */
 export function renderCsv(table: ReportTable): string {
   const lines: string[] = [];
   lines.push(csvRow([table.title]));
@@ -59,9 +51,7 @@ export function renderCsv(table: ReportTable): string {
   return '﻿' + lines.join('\r\n') + '\r\n';
 }
 
-// ---------------------------------------------------------------------------
-// HTML (print-ready → PDF / Word)
-// ---------------------------------------------------------------------------
+// --- HTML (print-ready → PDF / Word) ---
 
 function htmlEscape(value: Cell): string {
   return cellText(value)
@@ -72,9 +62,8 @@ function htmlEscape(value: Cell): string {
 }
 
 /**
- * Render to a single self-contained HTML document with A4 print styling. The
- * frontend opens it and triggers the browser's print dialog (→ Save as PDF), so
- * "Xuất PDF" needs no server-side PDF engine. Word can also open the file.
+ * Render a self-contained A4 print HTML document; the frontend prints it to PDF, so
+ * "Xuất PDF" needs no server PDF engine. Word can open the file too.
  */
 export function renderHtml(table: ReportTable): string {
   const summaryCards = table.summary
@@ -109,9 +98,7 @@ export function renderHtml(table: ReportTable): string {
   .kpi { border: 1px solid #E8EAEE; border-radius: 10px; padding: 10px 16px; min-width: 120px; }
   .kpi-v { font-size: 22px; font-weight: 800; color: #EE0033; }
   .kpi-l { font-size: 11px; color: #6B7280; margin-top: 2px; text-transform: uppercase; letter-spacing: .3px; }
-  /* table-layout: fixed + border-collapse: separate keep large (10k-row) reports
-     fast to lay out and print: the engine no longer measures every cell to size
-     columns (auto layout) nor runs the costly collapsed-border algorithm. */
+  /* fixed layout + separate borders keep 10k-row reports fast to lay out and print. */
   table { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-size: 11px; }
   th { background: #FAFBFC; text-align: left; padding: 7px 9px; border-bottom: 2px solid #EEF0F3; color: #6B7280; text-transform: uppercase; font-size: 10px; letter-spacing: .2px; word-break: break-word; }
   td { padding: 6px 9px; border-bottom: 1px solid #F2F3F5; vertical-align: top; word-break: break-word; overflow-wrap: anywhere; }

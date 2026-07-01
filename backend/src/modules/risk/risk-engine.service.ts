@@ -47,7 +47,7 @@ interface StationRow {
   riskStatus: RiskStatus | null;
 }
 
-/** One day of aggregated forecast for a station (rain summed, river level peaked). */
+/** One day of aggregated forecast (rain summed, river level peaked). */
 interface DailyForecast {
   forecastDate: string; // YYYY-MM-DD
   rainfall: number;
@@ -67,9 +67,8 @@ interface AssessmentInsert {
 }
 
 /**
- * Scalar-only insert shape for alert_histories. Inserting AlertHistory *instances*
- * trips TypeORM's QueryDeepPartialEntity over the nullable relation columns; a
- * plain object sidesteps it (same pattern as WeatherIngestionService).
+ * Scalar-only insert shape for alert_histories — inserting AlertHistory instances
+ * trips TypeORM's QueryDeepPartialEntity over the nullable relation columns.
  */
 interface AlertInsert {
   stationId: number;
@@ -83,24 +82,19 @@ interface AlertInsert {
 }
 
 /**
- * Group G — the Risk Engine. This is the consumer the event-driven backbone was
- * waiting for: it subscribes to the four trigger channels, recomputes the
- * pre-computed risk table from the four-layer model in {@link assessRisk}, writes
- * `station_risk_assessments` + `alert_histories`, caches each station's current
- * `risk_status`, and emits RISK_DELTA so the gateway pushes changes to clients.
+ * Group G — the Risk Engine. Consumes the four trigger channels, recomputes risk
+ * via {@link assessRisk}, writes `station_risk_assessments` + `alert_histories`,
+ * caches each station's `risk_status`, and emits RISK_DELTA. Read APIs (36–39) only
+ * query these tables — risk is never computed inline.
  *
- * Read APIs (36–39, in {@link RiskService}) only ever query the tables this writes
- * — risk is never computed inline on a request.
- *
- * Single-flight: WEATHER_SNAPSHOT is delivered to every API instance over the bus,
- * so a Redis lock (NX PX) lets exactly one instance run the full recompute. The
- * targeted recomputes (threshold/scope changes) are cheap and run unlocked.
+ * Single-flight: WEATHER_SNAPSHOT reaches every instance over the bus, so a Redis
+ * NX PX lock lets exactly one run the full recompute. Targeted recomputes run unlocked.
  */
 @Injectable()
 export class RiskEngineService implements OnModuleInit {
   private readonly logger = new Logger(RiskEngineService.name);
-  // Per-group hazard weights, AHP-derived from the river-vs-rain judgment. The
-  // group is picked per station from its configured tiers (weightsForStation).
+  // AHP-derived per-group hazard weights; the group is picked per station via
+  // weightsForStation.
   private readonly weightProfiles: RiskWeightProfiles;
   private readonly weightDerivation: RiskWeightDerivation;
 
@@ -117,7 +111,7 @@ export class RiskEngineService implements OnModuleInit {
     this.weightProfiles = this.weightDerivation.profiles;
   }
 
-  /** Subscribe the engine to the four triggers once the module is up. */
+  /** Subscribe to the four triggers on startup. */
   async onModuleInit(): Promise<void> {
     await this.eventBus.subscribe(EVENT_CHANNELS.WEATHER_SNAPSHOT, (p) =>
       this.onWeatherSnapshot(p.snapshotId, p.sourceCode),
@@ -129,8 +123,7 @@ export class RiskEngineService implements OnModuleInit {
       this.recomputeStations(p.stationIds).then(() => undefined),
     );
     await this.eventBus.subscribe(EVENT_CHANNELS.EVENT_CLOSED, () =>
-      // Scope freezes at assignment; on close just refresh everything cheaply
-      // enough by recomputing from the latest snapshot. No-op if none yet.
+      // Scope froze at assignment; on close just recompute from the latest snapshot.
       this.recomputeAll().then(() => undefined),
     );
     const { river, rainOnly } = this.weightProfiles;
@@ -143,28 +136,22 @@ export class RiskEngineService implements OnModuleInit {
     );
   }
 
-  // ---------------------------------------------------------------------------
-  // Trigger handlers
-  // ---------------------------------------------------------------------------
+  // --- Trigger handlers ---
 
   /** WEATHER_SNAPSHOT: forecast snapshots drive a full recompute; disaster ones are ignored. */
   private async onWeatherSnapshot(
     snapshotId: string,
     source: string,
   ): Promise<void> {
-    // Disaster sources never carry forecast data → ignore them.
     if (source === 'GDACS' || source === 'EONET' || source === 'ReliefWeb') return;
     await this.recomputeAll(snapshotId);
   }
 
-  // ---------------------------------------------------------------------------
-  // Full recompute (single-flight via Redis lock)
-  // ---------------------------------------------------------------------------
+  // --- Full recompute (single-flight via Redis lock) ---
 
   /**
-   * Recompute risk for every active station off a forecast snapshot. If no
-   * snapshotId is given, the latest successful forecast snapshot is used. Guarded
-   * by a cluster-wide lock so only one instance does the work per snapshot.
+   * Recompute risk for every active station off a snapshot (latest SUCCESS forecast
+   * if none given). Cluster-wide lock ensures one instance works per snapshot.
    */
   async recomputeAll(snapshotId?: string): Promise<{ stations: number }> {
     const sid = snapshotId ?? (await this.latestForecastSnapshotId());
@@ -194,15 +181,13 @@ export class RiskEngineService implements OnModuleInit {
       );
       return { stations: count };
     } finally {
-      // Best-effort release (only if we still hold it).
+      // Release only if we still hold it.
       const holder = await this.redis.client.get(RISK_RECOMPUTE_LOCK_KEY);
       if (holder === token) await this.redis.client.del(RISK_RECOMPUTE_LOCK_KEY);
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Targeted recompute (threshold / scope changes) — small, runs unlocked
-  // ---------------------------------------------------------------------------
+  // --- Targeted recompute (threshold / scope changes) — runs unlocked ---
 
   /** Recompute a specific set of stations off the latest forecast snapshot. */
   async recomputeStations(stationIds: number[]): Promise<{ stations: number }> {
@@ -216,14 +201,11 @@ export class RiskEngineService implements OnModuleInit {
     return { stations: count };
   }
 
-  // ---------------------------------------------------------------------------
-  // Core: compute verdicts + persist + emit deltas
-  // ---------------------------------------------------------------------------
+  // --- Core: compute verdicts + persist + emit deltas ---
 
   /**
-   * Score every supplied station over the 5–7 day horizon and persist the result.
-   * `weatherSnapshotId` is copied onto any alert_histories raised this run.
-   * Returns how many stations actually had forecast data to score.
+   * Score every station over the 5–7 day horizon and persist. `weatherSnapshotId`
+   * is copied onto any alerts raised. Returns how many stations had data to score.
    */
   private async computeAndPersist(
     stations: StationRow[],
@@ -253,8 +235,7 @@ export class RiskEngineService implements OnModuleInit {
       processed.push(station.id);
 
       const tiers = tiersByStation.get(station.id) ?? [];
-      // Weights are chosen by the station's group (river-monitored vs rain-only),
-      // resolved once per station since the tiers don't change across the horizon.
+      // Group (river-monitored vs rain-only) is fixed across the horizon → resolve once.
       const weights = weightsForStation(tiers, this.weightProfiles);
       const pct = station.provinceId
         ? percentiles.get(station.provinceId)
@@ -266,7 +247,6 @@ export class RiskEngineService implements OnModuleInit {
       let worstVerdict: RiskVerdict | null = null;
       let worstDate = '';
 
-      // Only days inside [today, today+horizon] feed the timeline.
       const horizonDays = series.filter(
         (d) => d.forecastDate >= from && d.forecastDate <= to,
       );
@@ -311,8 +291,8 @@ export class RiskEngineService implements OnModuleInit {
         deltas.push({ station, status: newStatus });
       }
 
-      // Raise an immutable alert record only on escalation into WARNING/DANGER —
-      // not on every recompute — so the history stays a true trigger log.
+      // Raise an alert only on escalation into WARNING/DANGER, so history stays a
+      // true trigger log rather than a per-recompute dump.
       if (
         worstVerdict &&
         worstLevel >= 2 &&
@@ -337,10 +317,9 @@ export class RiskEngineService implements OnModuleInit {
   }
 
   /**
-   * One transaction: clear the horizon's stale assessments for the processed
-   * stations, bulk-insert the fresh rows, update changed station.risk_status, and
-   * append any new alert_histories. Replace-then-insert (rather than upsert) keeps
-   * the write simple without needing a unique constraint on (station_id, date).
+   * One transaction: clear the horizon's stale assessments, bulk-insert fresh rows,
+   * update changed risk_status, append new alerts. Replace-then-insert avoids needing
+   * a unique constraint on (station_id, date).
    */
   private async persist(
     processedStationIds: number[],
@@ -403,9 +382,7 @@ export class RiskEngineService implements OnModuleInit {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Data loading
-  // ---------------------------------------------------------------------------
+  // --- Data loading ---
 
   private horizon(): { from: string; to: string } {
     const today = new Date();
@@ -452,7 +429,7 @@ export class RiskEngineService implements OnModuleInit {
     }));
   }
 
-  /** Per-station daily aggregation from one snapshot (rain summed, river level peaked). */
+  /** Per-station daily aggregation from one snapshot (rain summed, river peaked). */
   private async loadDailyForecasts(
     snapshotId: string,
     stationIds: number[],
@@ -561,7 +538,7 @@ export class RiskEngineService implements OnModuleInit {
   }
 }
 
-/** Format a Date as YYYY-MM-DD (date-only key matching the DATE column). */
+/** Format a Date as YYYY-MM-DD. */
 function toDateStr(d: Date): string {
   return d.toISOString().slice(0, 10);
 }

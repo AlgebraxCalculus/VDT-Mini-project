@@ -1,16 +1,8 @@
 /**
- * NASA EONET v3 events → normalized disaster events.
- *
- * EONET is the geometry-bearing fallback for event ingestion (used when GDACS is
- * unreachable). Its payload is `{ events: [{ id, title, categories:[{id,title}],
- * geometry:[{date,type,coordinates}] }] }`. We keep only the two hazards this
- * system models — severe storms (→ STORM) and floods (→ FLOOD) — and reduce each
- * to the same {@link NormalizedDisaster} shape the ingestion service consumes, so
- * downstream scoping is source-agnostic.
- *
- * Parsing is defensive: geometry is a *track* (one entry per observation), so we
- * take the most recent usable entry; a Point becomes a type/size buffer via the
- * shared {@link pointToGeom}, a Polygon is passed through as GeoJSON.
+ * NASA EONET v3 events → normalized disaster events. Geometry-bearing event fallback
+ * (GDACS unreachable). Keeps only severe storms (→ STORM) and floods (→ FLOOD).
+ * Geometry is a track; the most recent usable entry is used — Point → buffer via
+ * {@link pointToGeom}, Polygon → GeoJSON passthrough.
  */
 
 import {
@@ -54,7 +46,7 @@ export function parseEonetEvents(
 
   for (const ev of events) {
     const mapped = mapCategory(ev.categories);
-    if (!mapped) continue; // not a hazard we model
+    if (!mapped) continue;
 
     const externalId = str(ev.id);
     if (!externalId) continue;
@@ -62,7 +54,7 @@ export function parseEonetEvents(
     const track = Array.isArray(ev.geometry) ? (ev.geometry as RawGeometry[]) : [];
     const latest = latestGeometry(track);
     const geom = latest ? pickGeometry(latest, mapped.code, radii) : null;
-    if (!geom) continue; // no usable location → can't scope it
+    if (!geom) continue; // no usable location → can't scope
 
     out.push({
       externalId,
@@ -70,7 +62,7 @@ export function parseEonetEvents(
       typeName: mapped.name,
       eventCode: `EONET-${externalId}`,
       name: (str(ev.title) ?? `${mapped.name} ${externalId}`).slice(0, 255),
-      alertLevel: null, // EONET has no alert-level concept
+      alertLevel: null, // EONET has no alert level
       startTime: parseDate(latest?.date ?? track[0]?.date),
       geom,
     });
@@ -79,9 +71,7 @@ export function parseEonetEvents(
   return out;
 }
 
-// ---------------------------------------------------------------------------
-// Internals
-// ---------------------------------------------------------------------------
+// --- Internals ---
 
 interface RawEvent {
   id?: unknown;

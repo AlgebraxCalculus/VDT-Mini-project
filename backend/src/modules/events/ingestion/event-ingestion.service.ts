@@ -18,10 +18,8 @@ import { parseEonetEvents } from './eonet.parser';
 import { parseReliefWebEvents } from './reliefweb.parser';
 
 /**
- * Event-ingestion source order. GDACS is primary; EONET is the geometry-bearing
- * fallback; ReliefWeb (country-level, no geometry → coarse scope) is last resort.
- * Note this differs from the weather module's disaster chain (GDACS→ReliefWeb→
- * EONET): for *event scope* a precise footprint matters, so EONET outranks ReliefWeb.
+ * Source order for event ingestion. EONET outranks ReliefWeb (unlike the weather
+ * module's chain) because event scope needs its geometry; ReliefWeb is country-level.
  */
 const SOURCE_PRIORITY: WeatherSource[] = [
   WeatherSource.GDACS,
@@ -30,9 +28,8 @@ const SOURCE_PRIORITY: WeatherSource[] = [
 ];
 
 /**
- * `event_code` prefix per source. Doubles as (a) the set of sources that have an
- * ingestion parser and (b) the filter that scopes the stale-close sweep to just
- * the source that produced the current feed.
+ * `event_code` prefix per source. Doubles as the set of parser-backed sources and
+ * the filter that scopes the stale-close sweep to the source that produced the feed.
  */
 const SOURCE_PREFIX: Partial<Record<WeatherSource, string>> = {
   [WeatherSource.GDACS]: 'GDACS-',
@@ -62,21 +59,13 @@ export interface IngestSummary {
 }
 
 /**
- * Group D — automatic disaster-event tracking. Replaces the removed manual create
- * (API 22): nobody declares events by hand. A cron pulls the disaster feed through
- * a fallback chain (GDACS → EONET → ReliefWeb; the first configured source that
- * responds wins), keeps only VN-relevant STORM/FLOOD hazards, and for each one:
- *
- *   1. upserts `disaster_events` keyed by a GDACS-derived `event_code` (dedupe);
- *   2. freezes scope into the N-N tables (`event_provinces` with a clipped impact
- *      polygon, `event_stations` for stations inside the footprint) via raw PostGIS;
- *   3. publishes EVENT_SCOPE_ASSIGNED so the Risk Engine recomputes the new stations.
- *
- * Events that drop out of the feed are transitioned ONGOING → CLOSED and emit
- * EVENT_CLOSED. All bus publishes are fire-and-forget after the DB commit.
- *
- * VN-relevance is decided spatially: an event is kept only if its footprint
- * intersects at least one province in our DB — which doubles as the scope query.
+ * Group D — automatic disaster-event tracking (replaces the removed manual API 22).
+ * A cron pulls the disaster feed through a GDACS → EONET → ReliefWeb fallback chain,
+ * keeps only VN-relevant STORM/FLOOD hazards, and per event: upserts `disaster_events`
+ * (deduped by `event_code`), freezes scope into `event_provinces`/`event_stations`
+ * via raw PostGIS, and publishes EVENT_SCOPE_ASSIGNED. Events that drop out of the
+ * feed go ONGOING → CLOSED (EVENT_CLOSED). Bus publishes are fire-and-forget post-commit.
+ * VN-relevance = footprint intersects a known province, which also serves as the scope query.
  */
 @Injectable()
 export class EventIngestionService {
@@ -107,8 +96,8 @@ export class EventIngestionService {
     const summary: IngestSummary = { created: 0, updated: 0, scopedStations: 0, closed: 0 };
 
     const fetched = await this.fetchWithFallback();
-    // Whole chain down/unconfigured → do NOT run the close-sweep (it would wrongly
-    // close every ongoing event just because no source answered this run).
+    // Whole chain down → skip the close-sweep, else it would close every ongoing
+    // event just because no source answered.
     if (!fetched) return summary;
 
     const { raw, source } = fetched;
@@ -118,7 +107,7 @@ export class EventIngestionService {
     const seen = new Set<string>();
     for (const ev of events) {
       const res = await this.upsertEvent(ev);
-      if (res.skipped) continue; // not VN-relevant
+      if (res.skipped) continue;
       seen.add(ev.eventCode);
       if (res.isNew) summary.created++;
       else summary.updated++;
@@ -129,9 +118,8 @@ export class EventIngestionService {
       }
     }
 
-    // Immediate close of active-source events that dropped out of this feed, plus a
-    // time-based safety net for zombie events left by a *different* source (e.g. an
-    // EONET event created during a GDACS outage that GDACS never lists once back).
+    // Close active-source events absent from this feed, plus an age-based safety net
+    // for zombies left by a different source (e.g. an EONET event GDACS never lists).
     summary.closed = await this.closeStale(seen, source);
     summary.closed += await this.closeStaleByAge();
 
@@ -142,15 +130,11 @@ export class EventIngestionService {
     return summary;
   }
 
-  // ---------------------------------------------------------------------------
-  // Source fetch (fallback chain) + normalization
-  // ---------------------------------------------------------------------------
+  // --- Source fetch (fallback chain) + normalization ---
 
   /**
-   * Try each configured source in priority order (GDACS → EONET → ReliefWeb) and
-   * return the first that answers, or null if every source failed or is
-   * unconfigured. Sources without an ingestion parser (no {@link SOURCE_PREFIX})
-   * are skipped even if present in the injected chain.
+   * Return the first configured, parser-backed source (in priority order) that
+   * answers, or null if all failed or are unconfigured.
    */
   private async fetchWithFallback(): Promise<{
     raw: unknown;
@@ -161,7 +145,7 @@ export class EventIngestionService {
     );
     const errors: string[] = [];
     for (const p of ordered) {
-      if (!SOURCE_PREFIX[p.code]) continue; // no ingestion parser for this source
+      if (!SOURCE_PREFIX[p.code]) continue; // no parser for this source
       if (!p.isConfigured()) {
         this.logger.debug(`skip ${p.code} (not configured)`);
         continue;
@@ -183,7 +167,7 @@ export class EventIngestionService {
     return null;
   }
 
-  /** Normalize a source's raw payload into the common {@link NormalizedDisaster} shape. */
+  /** Normalize a source's raw payload into {@link NormalizedDisaster}. */
   private normalize(source: WeatherSource, raw: unknown): NormalizedDisaster[] {
     switch (source) {
       case WeatherSource.GDACS:
@@ -197,18 +181,15 @@ export class EventIngestionService {
     }
   }
 
-  // ---------------------------------------------------------------------------
-  // Per-event upsert + scope (one transaction)
-  // ---------------------------------------------------------------------------
+  // --- Per-event upsert + scope (one transaction) ---
 
   private async upsertEvent(ev: NormalizedDisaster): Promise<UpsertResult> {
     const { sql: geomSql, params: geomParams } = affectedSql(ev.geom);
-    // event_id placeholder index sits right after the geometry params.
+    // event_id placeholder sits right after the geometry params.
     const eIdx = geomParams.length + 1;
 
     return this.dataSource.transaction(async (m: EntityManager) => {
-      // VN-relevance gate (also the scope predicate): does the footprint touch
-      // any province we know about?
+      // VN-relevance gate + scope predicate: does the footprint touch any province?
       const hit = await m.query(
         `WITH a AS (SELECT ${geomSql} AS geom)
          SELECT 1 FROM provinces p, a WHERE ST_Intersects(p.boundary, a.geom) LIMIT 1`,
@@ -243,8 +224,7 @@ export class EventIngestionService {
       const scopeParams = [...geomParams, eventId];
 
       // Affected provinces — store the clipped footprint's bounding polygon
-      // (ST_Envelope guarantees a single Polygon for the Polygon-typed column;
-      // area>0 drops mere edge-touches).
+      // (ST_Envelope keeps the column single-Polygon; area>0 drops edge-touches).
       await m.query(
         `WITH a AS (SELECT ${geomSql} AS geom)
          INSERT INTO event_provinces (event_id, province_id, affected_area)
@@ -257,8 +237,7 @@ export class EventIngestionService {
         scopeParams,
       );
 
-      // Affected stations — only newly-added ids are returned (scope grows
-      // incrementally as the hazard moves; existing links are kept).
+      // Affected stations — scope grows incrementally; only newly-added ids return.
       const added = await m.query<{ station_id: number }[]>(
         `WITH a AS (SELECT ${geomSql} AS geom)
          INSERT INTO event_stations (event_id, station_id)
@@ -294,15 +273,12 @@ export class EventIngestionService {
     return rows[0].id;
   }
 
-  // ---------------------------------------------------------------------------
-  // Lifecycle: close events that left the feed
-  // ---------------------------------------------------------------------------
+  // --- Lifecycle: close events that left the feed ---
 
   /**
-   * Close ONGOING events *from the source that produced this feed* that are absent
-   * from it (the hazard ended). Scoped by the source's event_code prefix so a
-   * failover to another source never closes the previous source's events. Skipped
-   * when nothing VN-relevant was seen (avoids closing on an empty/misconfigured feed).
+   * Close ONGOING events from this feed's source that are absent from it. Scoped by
+   * the source's event_code prefix so a failover never closes another source's events;
+   * skipped when nothing VN-relevant was seen (avoids closing on an empty feed).
    */
   private async closeStale(seen: Set<string>, source: WeatherSource): Promise<number> {
     const prefix = SOURCE_PREFIX[source];
@@ -325,11 +301,9 @@ export class EventIngestionService {
   }
 
   /**
-   * Safety net: close any ONGOING auto-ingested event not refreshed within the
-   * staleness window (`DISASTER_STALE_CLOSE_HOURS`, default 24). Every upsert bumps
-   * updated_at, so this only catches events no source has confirmed for a while —
-   * chiefly zombies left by a fallback source that is no longer the active one.
-   * Set the env to 0 to disable.
+   * Safety net: close any ONGOING auto-ingested event not refreshed within
+   * `DISASTER_STALE_CLOSE_HOURS` (default 24, 0 disables). Since every upsert bumps
+   * updated_at, this only catches zombies a no-longer-active source left behind.
    */
   private async closeStaleByAge(): Promise<number> {
     const hours = parseFloat(this.config.get<string>('DISASTER_STALE_CLOSE_HOURS') ?? '24');
@@ -350,9 +324,7 @@ export class EventIngestionService {
     return rows.length;
   }
 
-  // ---------------------------------------------------------------------------
-  // Bus publishes (fire-and-forget, post-commit)
-  // ---------------------------------------------------------------------------
+  // --- Bus publishes (fire-and-forget, post-commit) ---
 
   private publishScope(eventId: string, stationIds: number[]): void {
     void this.eventBus
@@ -387,10 +359,7 @@ export class EventIngestionService {
   }
 }
 
-/**
- * Build the PostGIS expression for an event's footprint, using $1..$n. Callers
- * append the event_id as $(n+1). Kept outside the class so it's trivially testable.
- */
+/** Build the PostGIS footprint expression using $1..$n; callers append event_id as $(n+1). */
 function affectedSql(geom: AffectedGeom): { sql: string; params: unknown[] } {
   switch (geom.kind) {
     case 'point':

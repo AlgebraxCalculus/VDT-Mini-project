@@ -30,11 +30,7 @@ import {
   UploadedCsvFile,
 } from './import/station-import.service';
 
-/**
- * Group C — Station management. Reads are open to any authenticated user
- * (Viewer+); writes require Operator/Admin per the RBAC matrix. Auth is enforced
- * globally (JwtAuthGuard); @Roles is read by the global RolesGuard.
- */
+/** Group C — Station management. Reads open to any authenticated user; writes require Operator/Admin. */
 @Controller('stations')
 export class StationsController {
   constructor(
@@ -43,10 +39,8 @@ export class StationsController {
   ) {}
 
   /**
-   * API 18 — POST /stations/import. Multipart CSV upload → 202 { jobId }. The
-   * file is shape-validated synchronously (400 on a malformed file); per-row
-   * validation + batched insert run async in StationImportProcessor.
-   * Declared before `:id` routes so the literal path isn't mis-parsed.
+   * API 18 — POST /stations/import. Multipart CSV → 202 { jobId }; shape-validated
+   * synchronously, then batch-inserted async. Declared before `:id` routes.
    */
   @Roles(RoleCode.OPERATOR, RoleCode.ADMIN)
   @Post('import')
@@ -72,11 +66,7 @@ export class StationsController {
     return this.stationsService.findAll(query);
   }
 
-  /**
-   * GET /stations/viewport — map BBOX query (GIST-indexed ST_MakeEnvelope/
-   * ST_Contains). Declared before `:id` so the literal path isn't swallowed by
-   * the numeric param route. Reads are open to any authenticated user (Viewer+).
-   */
+  /** GET /stations/viewport — map BBOX query. Declared before `:id`. */
   @Get('viewport')
   findInViewport(@Query() query: ViewportStationsDto) {
     return this.stationsService.findInViewport(query);

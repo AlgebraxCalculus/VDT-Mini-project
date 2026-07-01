@@ -3,9 +3,9 @@ import type { Account, Role, RouteKey } from '../types';
 
 export const ROLE_ORDER: Record<Role, number> = { viewer: 0, operator: 1, admin: 2 };
 
-// --- Bridge between backend role codes (ADMIN/…) and the FE role model. ---
+// --- Bridge between backend role codes and the FE role model ---
 
-/** Backend RoleCode → FE Role (used for sidebar gating). VIEWER is the floor. */
+/** Backend RoleCode → FE Role (sidebar gating); VIEWER is the floor. */
 export function roleFromCode(code: RoleCode | null): Role {
   if (code === 'ADMIN') return 'admin';
   if (code === 'OPERATOR') return 'operator';
@@ -49,8 +49,7 @@ export const LOCK_MIN: Partial<Record<RouteKey, number>> = {
   import: 1,
   events: 1,
   accounts: 2,
-  // Health/integrations config is Admin-only — matches the backend API 35
-  // (GET /integrations/health is @Roles(ADMIN)).
+  // Admin-only, matching API 35's @Roles(ADMIN).
   health: 2,
 };
 

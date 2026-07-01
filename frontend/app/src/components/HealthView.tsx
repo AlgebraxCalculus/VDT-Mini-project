@@ -8,10 +8,7 @@ import {
   type SourceHealth,
 } from '../lib/api';
 
-// Friendly VN label + description per backend source `code` (API 35 sends only the code).
-// Keys must match the WeatherSource codes in HEALTH_PROVIDERS (backend):
-// forecast chain Open-Meteo → MET Norway → WeatherAPI; disaster chain GDACS →
-// ReliefWeb → EONET; GloFAS supplies river water level.
+// VN label + description per backend source `code` (must match the WeatherSource codes).
 const SOURCE_META: Record<string, { name: string; desc: string }> = {
   OpenMeteo: { name: 'Open-Meteo', desc: 'Dự báo thời tiết · nguồn chính' },
   MetNorway: { name: 'MET Norway (Yr)', desc: 'Dự báo · dự phòng #1' },
@@ -22,13 +19,12 @@ const SOURCE_META: Record<string, { name: string; desc: string }> = {
   GloFAS: { name: 'GloFAS (Copernicus)', desc: 'Mực nước sông · cập nhật theo ngày' },
 };
 
-// A source that is UP but slower than this (ms) is surfaced as "Phản hồi chậm".
+// An UP source slower than this (ms) shows as "Phản hồi chậm".
 const SLOW_MS = 3000;
 
 type Tone = [label: string, color: string, bg: string];
 
-// Map (configured + status + latency) → display tone. The backend has no "slow"
-// state, so it is derived here from latencyMs.
+// (configured + status + latency) → display tone; "slow" is derived here from latencyMs.
 function tone(s: SourceHealth): Tone {
   if (!s.configured) return ['Chưa cấu hình', '#6B7280', '#F1F2F4'];
   if (s.status === 'DOWN') return ['Gián đoạn', '#EE0033', '#FDE7EB'];
@@ -43,14 +39,14 @@ const fmtTime = (iso: string | null) =>
   iso ? new Date(iso).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : '—';
 const fmtErrRate = (r: number) => `${(r * 100).toFixed(1)}%`;
 
-// Friendly VN label per BullMQ queue (the backend sends the raw queue name).
+// VN label per BullMQ queue (backend sends the raw name).
 const QUEUE_LABEL: Record<RecentJob['queue'], string> = {
   weather: 'Đồng bộ thời tiết',
   reports: 'Xuất báo cáo',
   'stations-import': 'Nhập trạm hàng loạt',
 };
 
-// state → [label, color, bg] for the status badge.
+// state → status badge tone.
 const JOB_TONE: Record<RecentJob['state'], Tone> = {
   active: ['Đang chạy', '#B45309', '#FEF3C7'],
   completed: ['Hoàn tất', '#16A34A', '#ECFDF3'],
@@ -61,10 +57,9 @@ const JOB_TONE: Record<RecentJob['state'], Tone> = {
   unknown: ['—', '#6B7280', '#F1F2F4'],
 };
 
-// The most relevant timestamp for a job, by lifecycle stage.
 const jobTime = (j: RecentJob) => fmtTime(j.finishedAt ?? j.startedAt ?? j.createdAt);
 
-// A short VN status line under the job title.
+// Short VN status line under the job title.
 function jobInfo(j: RecentJob): string {
   if (j.state === 'active') return `Đang xử lý · ${j.progress}%`;
   if (j.state === 'failed') return (j.failedReason ?? 'Tác vụ thất bại').slice(0, 90);
@@ -79,9 +74,7 @@ export default function HealthView() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  // `refresh` true → POST /integrations/health/refresh (re-probe every source now);
-  // false → GET the last cached results (used on mount, fast). The button below
-  // passes true so an admin can force a fresh check without waiting for the cron.
+  // refresh=true re-probes every source now (POST); false GETs cached results (mount).
   const load = useCallback(async (refresh = false) => {
     setLoading(true);
     setError(null);
@@ -98,8 +91,7 @@ export default function HealthView() {
     } finally {
       setLoading(false);
     }
-    // Recent background jobs are non-critical — a failure just hides the panel
-    // and never blanks the health cards above.
+    // Recent jobs are non-critical — a failure just hides the panel.
     try {
       setJobs(await apiGetRecentJobs());
     } catch {
@@ -192,8 +184,7 @@ export default function HealthView() {
           </div>
         )}
 
-        {/* Tác vụ nền gần đây — đọc trực tiếp từ các hàng đợi BullMQ (GET /system/jobs,
-            Admin-only): đồng bộ thời tiết, xuất báo cáo, nhập trạm hàng loạt. */}
+        {/* Recent background jobs from the BullMQ queues (GET /system/jobs, Admin-only). */}
         <div style={{ fontSize: 14, fontWeight: 700, margin: '22px 0 12px' }}>Tác vụ nền gần đây</div>
         <div style={{ background: '#fff', border: '1px solid #E8EAEE', borderRadius: 14, overflow: 'hidden' }}>
           {(jobs ?? []).map((j) => {
