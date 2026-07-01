@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { useApp } from '../state/AppStateContext';
-import { riskMeta, thresholdAt } from '../data/mockData';
+import { riskMeta, thresholdAt } from '../lib/display';
 import {
   ApiError,
   apiCreateStation,
@@ -380,7 +380,7 @@ export default function StationsView() {
               <span style={{ textAlign: 'center', fontSize: 12.5, fontFamily: "'IBM Plex Mono',monospace", color: '#9AA0A6' }}>{s.stt}</span>
               <span style={{ fontSize: 12, fontFamily: "'IBM Plex Mono',monospace", color: '#6B7280' }}>{s.stationCode}</span>
               <span style={{ fontSize: 13.5, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{s.name}</span>
-              <span style={{ fontSize: 12.5, color: '#6B7280' }}>{s.province?.name ?? '—'}</span>
+              <span style={{ fontSize: 12.5, color: s.province?.name ? '#6B7280' : '#C2730A' }}>{s.province?.name ?? 'Chưa xác định'}</span>
               <span style={{ fontSize: 12, color: '#6B7280', fontFamily: "'IBM Plex Mono',monospace" }}>{s.coord}</span>
               <span style={{ fontSize: 12, color: '#475569', fontWeight: 600, fontFamily: "'IBM Plex Mono',monospace" }}>{s.elevText}</span>
               <span style={{ fontSize: 11.5, color: '#6B7280', fontFamily: "'IBM Plex Mono',monospace" }}>{s.thrText}</span>

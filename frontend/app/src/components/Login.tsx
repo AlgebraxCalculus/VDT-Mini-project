@@ -8,7 +8,6 @@ export default function Login() {
 
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const [showPassword, setShowPassword] = useState(false);
   const [remember, setRemember] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
@@ -34,7 +33,12 @@ export default function Login() {
       setError(
         err instanceof ApiError
           ? err.status === 401
-            ? 'Sai tên đăng nhập hoặc mật khẩu.'
+            ? // The backend returns 401 for both wrong credentials and a locked
+              // account ('Account is disabled'); only the message distinguishes
+              // them, so branch on it to show the right reason.
+              /disabled/i.test(err.message)
+              ? 'Tài khoản đã bị khóa.'
+              : 'Sai tên đăng nhập hoặc mật khẩu.'
             : err.message
           : 'Đăng nhập thất bại. Vui lòng thử lại.',
       );
@@ -143,29 +147,10 @@ export default function Login() {
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
                 onKeyDown={(e) => e.key === 'Enter' && void submit()}
-                type={showPassword ? 'text' : 'password'}
+                type="password"
                 placeholder="Mật khẩu"
-                style={{ border: 'none', outline: 'none', flex: 1, fontSize: 14.5, color: '#16181D', background: 'transparent', letterSpacing: showPassword ? 0 : 1 }}
+                style={{ border: 'none', outline: 'none', flex: 1, fontSize: 14.5, color: '#16181D', background: 'transparent', letterSpacing: 1 }}
               />
-              <button
-                type="button"
-                onClick={() => setShowPassword((v) => !v)}
-                title={showPassword ? 'Ẩn mật khẩu' : 'Hiện mật khẩu'}
-                aria-label={showPassword ? 'Ẩn mật khẩu' : 'Hiện mật khẩu'}
-                style={{ flex: 'none', display: 'flex', alignItems: 'center', justifyContent: 'center', width: 26, height: 26, border: 'none', background: 'transparent', cursor: 'pointer', color: '#9AA0A6', padding: 0 }}
-              >
-                {showPassword ? (
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-                    <path d="M3 3l18 18" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-                    <path d="M10.6 6.1A9.8 9.8 0 0 1 12 6c6.5 0 10 6 10 6a17.4 17.4 0 0 1-3 3.5M6.5 7.6A17.2 17.2 0 0 0 2 12s3.5 6 10 6a9.7 9.7 0 0 0 3.4-.6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-                  </svg>
-                ) : (
-                  <svg width="18" height="18" viewBox="0 0 24 24" fill="none">
-                    <path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7-10-7-10-7Z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
-                    <circle cx="12" cy="12" r="3" stroke="currentColor" strokeWidth="1.6" />
-                  </svg>
-                )}
-              </button>
             </div>
           </div>
 

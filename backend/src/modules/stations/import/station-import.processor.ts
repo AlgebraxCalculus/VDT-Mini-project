@@ -4,6 +4,7 @@ import { Job } from 'bullmq';
 import { DataSource, EntityManager } from 'typeorm';
 import { EventBusService } from '../../../event-bus/event-bus.service';
 import { EVENT_CHANNELS } from '../../../event-bus/event-bus.constants';
+import { ProvinceResolverService } from '../../provinces/province-resolver.service';
 import { AlertLevel, FloodThreshold } from '../entities/flood-threshold.entity';
 import { Station } from '../entities/station.entity';
 import {
@@ -45,6 +46,9 @@ export class StationImportProcessor extends WorkerHost {
   constructor(
     private readonly dataSource: DataSource,
     private readonly eventBus: EventBusService,
+    // Resolves (and auto-creates, via geocoding) the province per coordinate —
+    // so imported stations outside the seeded provinces still get a province_id.
+    private readonly provinceResolver: ProvinceResolverService,
   ) {
     super();
   }
@@ -66,24 +70,37 @@ export class StationImportProcessor extends WorkerHost {
     for (let start = 0; start < total; start += IMPORT_BATCH_SIZE) {
       const batch = records.slice(start, start + IMPORT_BATCH_SIZE);
 
-      await this.dataSource.transaction(async (manager) => {
-        for (const rec of batch) {
-          const result = this.validate(rec, seen, existing);
-          if (!result.ok) {
-            if (errors.length < IMPORT_ERROR_CAP) {
-              errors.push({
-                row: rec.rowNum,
-                stationCode: rec.stationCode,
-                message: result.message,
-              });
-            }
-            continue;
+      // Pre-pass (no transaction): validate, then resolve each province. Province
+      // resolution may reverse-geocode + create a province, so it must NOT run
+      // inside the insert transaction (a network call would hold the DB lock and,
+      // at 1 req/s, keep it open for minutes).
+      const ready: { row: ValidRow; provinceId: number | null }[] = [];
+      for (const rec of batch) {
+        const result = this.validate(rec, seen, existing);
+        if (!result.ok) {
+          if (errors.length < IMPORT_ERROR_CAP) {
+            errors.push({
+              row: rec.rowNum,
+              stationCode: rec.stationCode,
+              message: result.message,
+            });
           }
-          const id = await this.insertStation(manager, result.row);
-          if (result.row.tiers.length > 0) thresholdStationIds.push(id);
-          // Reserve the code so later rows can't collide with it.
-          seen.add(result.row.stationCode);
-          existing.add(result.row.stationCode);
+          continue;
+        }
+        // Reserve the code now so later rows in the file can't collide with it.
+        seen.add(result.row.stationCode);
+        existing.add(result.row.stationCode);
+        const provinceId = await this.provinceResolver.resolveProvinceId(
+          result.row.latitude,
+          result.row.longitude,
+        );
+        ready.push({ row: result.row, provinceId });
+      }
+
+      await this.dataSource.transaction(async (manager) => {
+        for (const { row, provinceId } of ready) {
+          const id = await this.insertStation(manager, row, provinceId);
+          if (row.tiers.length > 0) thresholdStationIds.push(id);
           success++;
         }
       });
@@ -180,6 +197,7 @@ export class StationImportProcessor extends WorkerHost {
   private async insertStation(
     manager: EntityManager,
     row: ValidRow,
+    provinceId: number | null,
   ): Promise<number> {
     const result = await manager.insert(Station, {
       stationCode: row.stationCode,
@@ -191,19 +209,14 @@ export class StationImportProcessor extends WorkerHost {
     });
     const id = result.identifiers[0].id as number;
 
-    // geom (SRID 4326) + province auto-assign by point-in-polygon — identical to
-    // StationsService.applyGeometry; geom is never written via TypeORM entity save.
+    // geom (SRID 4326); province_id was already resolved in the pre-pass (spatial
+    // fast-path, else geocode + auto-create). geom is never written via entity save.
     await manager.query(
       `UPDATE stations
           SET geom = ST_SetSRID(ST_MakePoint($1, $2), 4326),
-              province_id = (
-                SELECT p.id FROM provinces p
-                 WHERE p.boundary IS NOT NULL
-                   AND ST_Contains(p.boundary, ST_SetSRID(ST_MakePoint($1, $2), 4326))
-                 LIMIT 1
-              )
-        WHERE id = $3`,
-      [row.longitude, row.latitude, id],
+              province_id = $3
+        WHERE id = $4`,
+      [row.longitude, row.latitude, provinceId, id],
     );
 
     if (row.tiers.length > 0) {

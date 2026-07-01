@@ -2,49 +2,41 @@ import { useEffect, useRef, useState } from 'react';
 import type { CSSProperties } from 'react';
 import L from 'leaflet';
 import { useApp } from '../state/AppStateContext';
-import { band, riskMeta, FLOOD_LEGEND, WEATHER_LEGENDS, forecastDayLabel, EVENTS } from '../data/mockData';
-import { apiListStationsInViewport, apiGetStationForecast, apiGetStationAlertHistory, apiGetProvinceForecast, ApiError } from '../lib/api';
+import { band, riskMeta, WEATHER_LEGENDS, forecastDayLabel } from '../lib/display';
+import {
+  apiGetMapStations,
+  apiGetMapEvents,
+  apiGetMapWeather,
+  apiSearchMapStations,
+  apiGetStation,
+  apiGetStationForecast,
+  apiGetStationAlertHistory,
+  apiGetProvinceForecast,
+  ApiError,
+  type MapCluster,
+  type MapEvent,
+  type WeatherOverlayLayer,
+} from '../lib/api';
 import { subscribeViewport, unsubscribeViewport, onRiskDelta, onRealtimeStatus, type RealtimeStatus } from '../lib/realtime';
 import type { AlertHistoryEntry, ClassifiedForecastPoint, ForecastPoint, MapLayout, Station, WeatherLayerKey } from '../types';
 
-const WEATHER_FIELDS: Record<WeatherLayerKey, [number, number, string, number][]> = {
-  temp: [
-    [21, 105.8, '#3B82F6', 0.18],
-    [18.5, 105.9, '#60A5FA', 0.2],
-    [16, 108, '#F59E0B', 0.22],
-    [13, 109, '#F97316', 0.24],
-    [10.7, 106.7, '#EF4444', 0.26],
-  ],
-  rain: [
-    [18, 106.2, '#2563EB', 0.22],
-    [16.8, 107.1, '#7C3AED', 0.26],
-    [16, 108.2, '#3B82F6', 0.2],
-    [15.2, 108.8, '#6366F1', 0.2],
-  ],
-  radar: [
-    [17.4, 106.6, '#7C3AED', 0.3],
-    [16.5, 107.6, '#8B5CF6', 0.26],
-    [18.3, 105.9, '#6366F1', 0.22],
-  ],
-  wind: [
-    [16.8, 107.1, '#EC4899', 0.24],
-    [16, 108.3, '#F472B6', 0.2],
-    [13.8, 109.2, '#DB2777', 0.22],
-  ],
+// Map the FE weather-layer buttons to the backend overlay field (API 29). 'radar'
+// is a rain-intensity visualization, so it reads the same rainfall field as 'rain'.
+const WEATHER_OVERLAY_LAYER: Record<WeatherLayerKey, WeatherOverlayLayer> = {
+  temp: 'temp',
+  rain: 'rain',
+  radar: 'rain',
+  wind: 'wind',
 };
 
-// Mock impact footprint. Real geometry will come from event_provinces.affected_area
-// (API 26 GET /events/{id}/stations · API 28 GET /map/events) once wired; for now
-// only the label is data-driven (sourced from the active event in the events list).
-const EVENT_POLY: [number, number][] = [
-  [18.4, 105.6],
-  [18.2, 107.1],
-  [16.3, 108.6],
-  [15.0, 109.1],
-  [15.2, 107.6],
-  [16.6, 106.4],
-  [17.6, 105.9],
-];
+// Per-layer overlay colour + the value (in the layer's unit) treated as full
+// intensity, used to scale each forecast point's opacity in [0.08, 0.32].
+const WEATHER_OVERLAY_STYLE: Record<WeatherLayerKey, { color: string; max: number }> = {
+  temp: { color: '#F97316', max: 38 },
+  rain: { color: '#2563EB', max: 50 },
+  radar: { color: '#7C3AED', max: 50 },
+  wind: { color: '#EC4899', max: 20 },
+};
 
 // Placeholder bar heights for the scrubber before a station's real series loads.
 // The dates are computed live (today → today+6) in `scrubDays`, not hardcoded.
@@ -87,7 +79,7 @@ const railBtnBase: CSSProperties = {
 
 export default function MapView() {
   const { state, patch, togglePlay } = useApp();
-  const { weatherLayer, floodOn, selectedId, searchText, scrubDay, playing, mapLayout } = state;
+  const { weatherLayer, selectedId, searchText, scrubDay, playing, mapLayout } = state;
 
   const mapNodeRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<L.Map | null>(null);
@@ -97,32 +89,56 @@ export default function MapView() {
   const stationLayerRef = useRef<L.LayerGroup | null>(null);
   const stationRendererRef = useRef<L.Canvas | null>(null);
   const weatherGroupRef = useRef<L.LayerGroup | null>(null);
-  const floodGroupRef = useRef<L.LayerGroup | null>(null);
   const eventGroupRef = useRef<L.LayerGroup | null>(null);
   const markerByIdRef = useRef<Record<number, L.CircleMarker>>({});
   const viewRef = useRef<{ c: [number, number]; z: number }>({ c: [16.4, 107.0], z: 6 });
 
-  // Real station data — fetched per map viewport (GET /stations/viewport, a
-  // GIST-indexed BBOX query), refetched on pan/zoom (debounced). Markers + flood
-  // circles below re-render when this changes; risk/weather panels read it
-  // null-safe. NOTE: the alerts panel reflects high-risk stations *in view*.
+  // Real station data — fetched per map viewport (GET /map/stations, a GIST-indexed
+  // BBOX query enriched with risk + a light forecast), refetched on pan/zoom
+  // (debounced). When the map is zoomed out the server returns grid clusters
+  // instead (`clusters` below) and `stations` is empty. Markers re-render when
+  // these change; risk/weather panels read them null-safe.
   const [stations, setStations] = useState<Station[]>([]);
+  const [clusters, setClusters] = useState<MapCluster[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Active events (API 28) + their affected polygons, and the weather overlay
+  // points (API 29) — both viewport-scoped and refetched on pan via viewportVersion.
+  const [mapEvents, setMapEvents] = useState<MapEvent[]>([]);
+  const [weatherPoints, setWeatherPoints] = useState<{ lat: number; lng: number; value: number }[]>([]);
+  // DB-backed viewport search (API 30) — replaces the old in-memory filter so it
+  // works even when the map is clustered (no individual stations loaded client-side).
+  const [searchResults, setSearchResults] = useState<Station[]>([]);
+  // Bumped (debounced) on every moveend so the event/weather effects refetch for
+  // the new rectangle without each owning its own map listener.
+  const [viewportVersion, setViewportVersion] = useState(0);
 
   // Real-time risk channel (APIs 44–47). `rtStatus` powers the live pill; deltas
   // for stations in view are merged into `stations` below.
   const [rtStatus, setRtStatus] = useState<RealtimeStatus>('connecting');
 
-  // Selected-station detail (APIs 38 & 39) — loaded on select, mock-backed for
-  // now. setState lives in the .then() callbacks of the effect below (not a
-  // synchronous effect body) to respect the project's set-state-in-effect baseline.
+  // Selected-station detail (APIs 38 & 39) — loaded from the real API on select
+  // (starts empty, never mock). setState lives in the .then() callbacks of the
+  // effect below (not a synchronous effect body) to respect the project's
+  // set-state-in-effect baseline.
   const [selForecast, setSelForecast] = useState<ClassifiedForecastPoint[]>([]);
   const [selHistory, setSelHistory] = useState<AlertHistoryEntry[]>([]);
   // Province aggregate forecast (API 37) of the selected station's province —
   // the single source the scrubber shows (the per-station series feeds only the
   // panel's 7-day risk bars, not the scrubber).
   const [provForecast, setProvForecast] = useState<ForecastPoint[]>([]);
+  // Detail (API 13) of the selected station, used as a fallback for the panel
+  // when the station was selected from another view (e.g. ForecastView's risk
+  // table) and isn't in the current map viewport yet — so the panel renders
+  // immediately and the fly-to has coordinates. Guarded by flownToRef so the
+  // fetch + fly happen once per selection, not on every pan.
+  const [selDetail, setSelDetail] = useState<Station | null>(null);
+  const flownToRef = useRef<number | null>(null);
+  // Latest viewport stations mirrored into a ref so the fly-to effect can do its
+  // "already in view" check without depending on `stations` — depending on it made
+  // every pan re-run the effect and cancel the in-flight detail fetch mid-select.
+  const stationsRef = useRef<Station[]>([]);
+  useEffect(() => { stationsRef.current = stations; }, [stations]);
 
   useEffect(() => {
     if (!mapNodeRef.current) return;
@@ -135,31 +151,40 @@ export default function MapView() {
       attribution: '© OpenStreetMap · © CARTO',
     }).addTo(map);
 
+    // Dedicated panes so hit-testing order is deterministic regardless of which
+    // fetch resolves first. Both the weather-overlay circles and the event-area
+    // polygons are interactive SVG in Leaflet's default overlayPane (z 400); the
+    // station dots draw on a canvas in the same pane, so whichever renderer's DOM
+    // node lands last would sit on top. Left to chance, an event polygon (its only
+    // handler being a tooltip) intercepts clicks meant for stations inside the
+    // affected area — the station's detail panel never opens. Pinning overlays
+    // below the stations pane fixes the click target. (overlayPane = 400.)
+    map.createPane('fws-overlays').style.zIndex = '410';
+    map.createPane('fws-stations').style.zIndex = '450';
+
     const weatherGroup = L.layerGroup().addTo(map);
-    const floodGroup = L.layerGroup();
     const eventGroup = L.layerGroup().addTo(map);
     weatherGroupRef.current = weatherGroup;
-    floodGroupRef.current = floodGroup;
     eventGroupRef.current = eventGroup;
 
     // Shared canvas renderer for the station squares: one <canvas> draws all
     // features in a single pass instead of 10k DOM nodes. padding keeps squares
-    // just off-screen rendered so they don't pop in at the viewport edge.
-    const stationRenderer = L.canvas({ padding: 0.5 });
+    // just off-screen rendered so they don't pop in at the viewport edge. Pinned
+    // to the stations pane so its clicks always win over the overlay polygons.
+    const stationRenderer = L.canvas({ padding: 0.5, pane: 'fws-stations' });
     stationRendererRef.current = stationRenderer;
     const stationLayer = L.layerGroup().addTo(map);
     stationLayerRef.current = stationLayer;
 
-    // Label the overlay from the active event (ONGOING-equivalent) in the events
-    // list, so it reflects real event data instead of a hardcoded string.
-    const activeEvent = EVENTS.find((e) => e.state === 'active' || e.state === 'monitor');
-    const poly = L.polygon(EVENT_POLY, { color: '#EE0033', weight: 2, fillColor: '#EE0033', fillOpacity: 0.08, dashArray: '6 5' }).addTo(eventGroup);
-    poly.bindTooltip(`${activeEvent?.name ?? 'Sự kiện thiên tai'} · Vùng ảnh hưởng`, { sticky: true });
+    // Event polygons (API 28) are drawn into eventGroup by a dedicated effect that
+    // refetches per viewport — no static placeholder geometry here.
 
-    // Fetch the stations inside the current map rectangle. Reads bounds fresh on
-    // each call (so no stale closure), then re-renders markers via `stations`.
-    // setState here runs inside a timer/event callback — not synchronously in
-    // the effect body — so it doesn't trip the set-state-in-effect rule.
+    // Fetch the stations inside the current map rectangle (API 27). Reads bounds +
+    // zoom fresh on each call (no stale closure). The server returns either
+    // individual enriched stations or grid clusters depending on zoom; we route
+    // each into its own state. Bumping viewportVersion drives the event/weather
+    // refetch effects. setState runs inside the resolved-promise / timer callbacks,
+    // not synchronously in the effect body, per the project's lint baseline.
     const fetchInView = () => {
       const m = mapRef.current;
       if (!m) return;
@@ -173,16 +198,24 @@ export default function MapView() {
       // Re-join the viewport's tile rooms (API 45) so live deltas track the pan/zoom.
       subscribeViewport(bbox);
       setLoading(true);
-      apiListStationsInViewport(bbox)
-        .then((data) => {
-          setStations(data);
+      apiGetMapStations(bbox, { zoom: Math.round(m.getZoom()) })
+        .then((res) => {
+          if (res.clustered) {
+            setClusters(res.clusters);
+            setStations([]);
+          } else {
+            setStations(res.stations);
+            setClusters([]);
+          }
           setLoadError(null);
         })
         .catch((e) => {
           setStations([]);
+          setClusters([]);
           setLoadError(e instanceof ApiError ? e.message : 'Không tải được danh sách trạm.');
         })
         .finally(() => setLoading(false));
+      setViewportVersion((v) => v + 1);
     };
 
     let debounce: ReturnType<typeof setTimeout> | undefined;
@@ -231,67 +264,136 @@ export default function MapView() {
     };
   }, []);
 
-  // (Re)build the station dots whenever the fetched data changes. Each station is
-  // a fixed-radius circle on the shared canvas renderer (not DOM markers, not
-  // clustered) — fixed pixel size keeps individual dots easy to hover/click at any
-  // zoom while staying performant at ~10k. All dots are green for now: the 10k
-  // stations have no real risk data yet (the Risk Engine / station_risk_assessments
-  // is unbuilt), so colour-by-risk-level would be meaningless. Swap fillColor for
-  // a floodLevel(score) lookup once the viewport API surfaces a real riskScore.
-  const STATION_GREEN = '#16A34A';
+  // (Re)build the station layer whenever the fetched data changes. Two mutually
+  // exclusive modes from API 27:
+  //   • zoomed out → `clusters`: one bubble per grid cell, sized by count and
+  //     coloured by the cell's worst risk status (server-side clustering).
+  //   • zoomed in  → `stations`: individual dots on the shared canvas renderer,
+  //     coloured by the station's real risk status with riskScore in the popup.
   useEffect(() => {
     const stationLayer = stationLayerRef.current;
     const renderer = stationRendererRef.current;
+    const map = mapRef.current;
     if (!stationLayer || !renderer) return;
     stationLayer.clearLayers();
     const markerById: Record<number, L.CircleMarker> = {};
+
+    if (clusters.length > 0) {
+      clusters.forEach((c) => {
+        const meta = riskMeta(c.riskStatus);
+        const r = Math.min(26, 11 + Math.sqrt(c.count) * 1.6);
+        const bubble = L.circleMarker([c.lat, c.lng], {
+          renderer, // stations pane — stays clickable above the overlay polygons
+          radius: r,
+          color: '#fff',
+          weight: 2,
+          fillColor: meta.color,
+          fillOpacity: 0.82,
+        });
+        bubble.bindTooltip(`${c.count} trạm`, { permanent: true, direction: 'center', className: 'fws-cluster-label' });
+        bubble.on('click', () => map?.flyTo([c.lat, c.lng], Math.max((map.getZoom() ?? 6) + 2, 9), { duration: 0.7 }));
+        stationLayer.addLayer(bubble);
+      });
+      markerByIdRef.current = {};
+      return;
+    }
+
     stations.forEach((s) => {
       if (s.latitude == null || s.longitude == null) return; // unmappable (no geom)
+      const meta = riskMeta(s.riskStatus);
       const dot = L.circleMarker([s.latitude, s.longitude], {
         renderer,
         radius: 5,
         color: '#fff',
         weight: 1,
-        fillColor: STATION_GREEN,
+        fillColor: meta.color,
         fillOpacity: 0.92,
       });
-      dot.bindPopup(
-        `<div style="font-weight:700;font-size:13.5px;">${s.name}</div><div style="font-size:11.5px;color:#9AA0A6;font-family:monospace;margin:2px 0 7px;">${s.stationCode} · ${s.province?.name ?? '—'}</div><div style="display:inline-block;font-size:11px;font-weight:700;color:#fff;background:${STATION_GREEN};padding:2px 8px;border-radius:6px;">Đang hoạt động</div>`
+      const scoreChip = s.riskScore != null ? ` · Chỉ số ${s.riskScore}` : '';
+      // Hover tooltip for a quick read; the click opens the rich detail panel
+      // (selectedId → panel). We deliberately DON'T bindPopup: a popup would open
+      // on the same click (and autoPan the map, triggering a viewport refetch that
+      // could swap out the marker mid-interaction) — the side panel is the detail.
+      dot.bindTooltip(
+        `<b>${s.name}</b><br><span style="color:#9AA0A6;font-family:monospace;font-size:11px;">${s.stationCode} · ${s.province?.name ?? '—'}</span><br><span style="color:${meta.color};font-weight:700;">${meta.label}${scoreChip}</span>`,
+        { direction: 'top', offset: [0, -4], opacity: 0.97 },
       );
       dot.on('click', () => patch({ selectedId: s.id }));
       markerById[s.id] = dot;
       stationLayer.addLayer(dot);
     });
     markerByIdRef.current = markerById;
-  }, [stations, patch]);
+  }, [stations, clusters, patch]);
 
+  // Active-event polygons (API 28): redraw eventGroup from the fetched footprints.
+  // Each affected area is a GeoJSON Polygon/MultiPolygon (event_provinces.affected_area
+  // union); we draw it in the brand red with the event name as a sticky tooltip.
   useEffect(() => {
-    const map = mapRef.current;
-    const floodGroup = floodGroupRef.current;
-    if (!map || !floodGroup) return;
-    floodGroup.clearLayers();
-    if (floodOn) {
-      stations.filter((s) => s.latitude != null && s.longitude != null && (s.riskScore ?? 0) >= 30).forEach((s) => {
-        const score = s.riskScore ?? 0;
-        const color = riskMeta(s.riskStatus).color;
-        L.circle([s.latitude!, s.longitude!], { radius: 6000 + score * 450, color, weight: 1, fillColor: color, fillOpacity: 0.16, interactive: false }).addTo(floodGroup);
+    const eventGroup = eventGroupRef.current;
+    if (!eventGroup) return;
+    eventGroup.clearLayers();
+    mapEvents.forEach((ev) => {
+      if (!ev.affectedArea) return;
+      const layer = L.geoJSON(ev.affectedArea, {
+        pane: 'fws-overlays', // below the stations pane so it never eats station clicks
+        style: { color: '#EE0033', weight: 2, fillColor: '#EE0033', fillOpacity: 0.08, dashArray: '6 5' },
       });
-      if (!map.hasLayer(floodGroup)) floodGroup.addTo(map);
-    } else if (map.hasLayer(floodGroup)) {
-      map.removeLayer(floodGroup);
-    }
-  }, [floodOn, stations]);
+      layer.bindTooltip(`${ev.name} · Vùng ảnh hưởng (${ev.stationCount} trạm)`, { sticky: true });
+      layer.addTo(eventGroup);
+    });
+  }, [mapEvents]);
 
+  // Active events in view (API 28) — refetched per viewport (viewportVersion).
+  // setState runs in the resolved-promise callback; failure clears the overlay.
   useEffect(() => {
-    const map = mapRef.current;
+    const m = mapRef.current;
+    if (!m) return;
+    const b = m.getBounds();
+    apiGetMapEvents({ minLng: b.getWest(), minLat: b.getSouth(), maxLng: b.getEast(), maxLat: b.getNorth() })
+      .then(setMapEvents)
+      .catch(() => setMapEvents([]));
+  }, [viewportVersion]);
+
+  // Weather overlay points (API 29) — fetched for the active layer, refetched on
+  // pan (viewportVersion). setState in the resolved callback; the draw effect below
+  // renders them. 'radar' maps to the rainfall field server-side.
+  useEffect(() => {
+    if (!weatherLayer) {
+      Promise.resolve().then(() => setWeatherPoints([]));
+      return;
+    }
+    const m = mapRef.current;
+    if (!m) return;
+    const b = m.getBounds();
+    apiGetMapWeather(
+      { minLng: b.getWest(), minLat: b.getSouth(), maxLng: b.getEast(), maxLat: b.getNorth() },
+      WEATHER_OVERLAY_LAYER[weatherLayer],
+    )
+      .then((res) => setWeatherPoints(res.points))
+      .catch(() => setWeatherPoints([]));
+  }, [weatherLayer, viewportVersion]);
+
+  // Draw the weather overlay: one soft circle per forecast point, opacity scaled by
+  // the field value vs the layer's full-intensity reference. Cleared when off.
+  useEffect(() => {
     const weatherGroup = weatherGroupRef.current;
-    if (!map || !weatherGroup) return;
+    if (!weatherGroup) return;
     weatherGroup.clearLayers();
     if (!weatherLayer) return;
-    (WEATHER_FIELDS[weatherLayer] || []).forEach((f) => {
-      L.circle([f[0], f[1]], { radius: 90000, color: f[2], weight: 0, fillColor: f[2], fillOpacity: f[3], interactive: false }).addTo(weatherGroup);
+    const style = WEATHER_OVERLAY_STYLE[weatherLayer];
+    weatherPoints.forEach((p) => {
+      const intensity = Math.max(0, Math.min(1, p.value / style.max));
+      L.circle([p.lat, p.lng], {
+        pane: 'fws-overlays', // keep the soft overlay under the stations pane
+        radius: 26000,
+        color: style.color,
+        weight: 0,
+        fillColor: style.color,
+        fillOpacity: 0.08 + intensity * 0.24,
+        interactive: false,
+      }).addTo(weatherGroup);
     });
-  }, [weatherLayer]);
+  }, [weatherLayer, weatherPoints]);
 
   // Load the selected station's 7-day forecast (API 38) + alert history (API 39).
   // Keyed by station id only — the forecast/history don't change on pan, so this
@@ -319,11 +421,56 @@ export default function MapView() {
     return () => { alive = false; };
   }, [selectedId]);
 
+  // Surface + locate a station selected from outside the map (ForecastView's risk
+  // table sets `selectedId` then routes here). The map opens country-wide, where
+  // it's clustered and the station isn't in `stations`, so `sel` can't resolve and
+  // the map doesn't move. Fetch the station's detail (API 13) → render the panel
+  // from it (selDetail fallback for `sel`) and fly to its coords past the cluster
+  // zoom so the viewport refetch loads the enriched marker. flownToRef makes this
+  // run once per selection.
+  //
+  // Keyed by `selectedId` ONLY (not `stations`): depending on `stations` re-ran the
+  // effect on every pan/initial-fetch, and its cleanup (`alive = false`) then
+  // cancelled the in-flight detail fetch just after flownToRef had already claimed
+  // the selection — so the remount early-returned and the fetch result was dropped,
+  // leaving the map un-flown with no panel (worse under StrictMode's double-invoke).
+  // We now read the "already in view" set via a ref and gate the async result on
+  // flownToRef instead of a cleanup flag, so the fetch always lands. setState stays
+  // in the resolved-promise callbacks.
+  useEffect(() => {
+    if (selectedId == null) {
+      flownToRef.current = null;
+      Promise.resolve().then(() => setSelDetail(null));
+      return;
+    }
+    if (flownToRef.current === selectedId) return;
+    // Already in view (e.g. clicked a map marker) → the panel resolves from
+    // `stations`; no fetch/fly needed. Read via the ref so pan changes don't re-run.
+    if (stationsRef.current.some((s) => s.id === selectedId)) {
+      flownToRef.current = selectedId;
+      return;
+    }
+    flownToRef.current = selectedId; // claim before the async call to avoid re-fetch
+    apiGetStation(selectedId)
+      .then((s) => {
+        if (flownToRef.current !== selectedId) return; // selection changed → stale
+        setSelDetail(s);
+        const map = mapRef.current;
+        if (map && s.latitude != null && s.longitude != null) {
+          map.flyTo([s.latitude, s.longitude], Math.max(map.getZoom(), 10), { duration: 0.8 });
+        }
+      })
+      .catch(() => { if (flownToRef.current === selectedId) setSelDetail(null); });
+  }, [selectedId]);
+
   // Province aggregate (API 37) for the selected station's province — the only
   // series the scrubber shows. Keyed by province id, so it doesn't refire on pan;
   // it also syncs the play timer to the province series' day count (5–7) and
   // restarts at today. setState stays in the resolved-promise callbacks.
-  const selProvinceId = stations.find((s) => s.id === selectedId)?.provinceId ?? null;
+  // The selected station: prefer the enriched viewport copy (has riskScore/weather),
+  // fall back to the fetched detail when it isn't in view yet (cross-view select).
+  const selStation = stations.find((s) => s.id === selectedId) ?? (selDetail?.id === selectedId ? selDetail : null);
+  const selProvinceId = selStation?.provinceId ?? null;
   useEffect(() => {
     let alive = true;
     if (selProvinceId == null) {
@@ -348,21 +495,41 @@ export default function MapView() {
     return () => { alive = false; };
   }, [selProvinceId, patch]);
 
+  // Viewport search (API 30): debounced free-text query against the DB, scoped to
+  // the current rectangle. Replaces the old in-memory filter so search still works
+  // when the map is clustered (no individual stations loaded client-side). setState
+  // runs in the resolved-promise / timer callbacks.
+  useEffect(() => {
+    const term = searchText.trim();
+    if (term.length < 2) {
+      const t = setTimeout(() => setSearchResults([]), 0);
+      return () => clearTimeout(t);
+    }
+    const timer = setTimeout(() => {
+      const m = mapRef.current;
+      if (!m) return;
+      const b = m.getBounds();
+      apiSearchMapStations(
+        { minLng: b.getWest(), minLat: b.getSouth(), maxLng: b.getEast(), maxLat: b.getNorth() },
+        { q: term, limit: 6 },
+      )
+        .then(setSearchResults)
+        .catch(() => setSearchResults([]));
+    }, 250);
+    return () => clearTimeout(timer);
+  }, [searchText]);
+
   const flyTo = (s: Station) => {
     const map = mapRef.current;
     if (map && s.latitude != null && s.longitude != null) {
       map.flyTo([s.latitude, s.longitude], Math.max(map.getZoom(), 9), { duration: 0.8 });
+      // After the fly settles, briefly surface the station's hover tooltip (the
+      // dot is re-rendered once the viewport refetch lands at the new zoom).
       const m = markerByIdRef.current[s.id];
-      if (m) setTimeout(() => m.openPopup(), 700);
+      if (m) setTimeout(() => m.openTooltip(), 800);
     }
     patch({ selectedId: s.id, searchText: '' });
   };
-
-  const q = searchText.trim().toLowerCase();
-  // Same search surface as the station list / backend: name, province, code.
-  const searchResults = q
-    ? stations.filter((s) => `${s.name} ${s.province?.name ?? ''} ${s.stationCode}`.toLowerCase().includes(q)).slice(0, 6)
-    : [];
 
   const alertStations = stations.filter((s) => s.riskStatus === 'WARNING' || s.riskStatus === 'DANGER')
     .sort((a, b) => (b.riskScore ?? 0) - (a.riskScore ?? 0))
@@ -372,7 +539,7 @@ export default function MapView() {
       return { ...s, reason, meta: riskMeta(s.riskStatus) };
     });
 
-  const sel = stations.find((s) => s.id === selectedId);
+  const sel = selStation;
   const selMeta = sel ? riskMeta(sel.riskStatus) : null;
 
   // Scrubber source: the selected station's province aggregate (API 37). Falls
@@ -427,20 +594,6 @@ export default function MapView() {
     return { ...railBtnBase, background: on ? '#EE0033' : '#fff', color: on ? '#fff' : '#4A4F57' };
   };
 
-  const floodBtnStyle: CSSProperties = {
-    display: 'flex',
-    alignItems: 'center',
-    gap: 7,
-    height: 44,
-    padding: '0 15px',
-    borderRadius: 22,
-    border: 'none',
-    cursor: 'pointer',
-    boxShadow: '0 3px 10px rgba(16,20,30,.14)',
-    background: floodOn ? '#EE0033' : '#fff',
-    color: floodOn ? '#fff' : '#6B7280',
-  };
-
   return (
     <div style={{ position: 'absolute', inset: 0 }}>
       <div ref={mapNodeRef} style={{ position: 'absolute', inset: 0, background: '#E8EBEF' }} />
@@ -476,10 +629,6 @@ export default function MapView() {
         </button>
         <button onClick={() => patch((s) => ({ weatherLayer: s.weatherLayer === 'wind' ? null : 'wind' }))} title="Lớp gió" style={wlBtnStyle('wind')}>
           <svg width="19" height="19" viewBox="0 0 24 24" fill="none"><path d="M3 9h11a2.5 2.5 0 1 0-2.5-2.5M3 14h14a2.5 2.5 0 1 1-2.5 2.5M3 11.5h7" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" /></svg>
-        </button>
-        <button onClick={() => patch({ floodOn: !floodOn })} title="Lớp nguy cơ lũ lụt" style={floodBtnStyle}>
-          <svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M12 3s6 6.5 6 11a6 6 0 0 1-12 0c0-4.5 6-11 6-11Z" fill="currentColor" /></svg>
-          <span style={{ fontSize: 13, fontWeight: 700 }}>Lũ lụt</span>
         </button>
       </div>
 
@@ -553,7 +702,7 @@ export default function MapView() {
             <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 10 }}>
               <div style={{ minWidth: 0 }}>
                 <div style={{ display: 'inline-flex', alignItems: 'center', gap: 6, padding: '3px 9px', borderRadius: 7, background: selMeta!.color, color: '#fff', fontSize: 11, fontWeight: 700 }}>
-                  Nguy cơ {selMeta!.label}{sel.riskScore != null ? ` · ${sel.riskScore}` : ''}
+                  {selMeta!.label}{sel.riskScore != null ? ` · ${sel.riskScore}` : ''}
                 </div>
                 <div style={{ fontSize: 17, fontWeight: 800, marginTop: 9, letterSpacing: -0.3 }}>{sel.name}</div>
                 <div style={{ fontSize: 12.5, color: '#9AA0A6', marginTop: 2, fontFamily: "'IBM Plex Mono',monospace" }}>{sel.stationCode} · {sel.province?.name ?? '—'}</div>
@@ -631,19 +780,6 @@ export default function MapView() {
           <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 10.5, color: '#9AA0A6', fontFamily: "'IBM Plex Mono',monospace" }}>
             {legend.ticks.map((t, i) => <span key={i}>{t}</span>)}
           </div>
-        </div>
-      )}
-
-      {floodOn && (
-        <div style={{ position: 'absolute', bottom: 96, right: 16, zIndex: 500, background: '#fff', borderRadius: 12, boxShadow: '0 6px 20px rgba(16,20,30,.14)', padding: '12px 14px', width: 172 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: '#3A3F47', letterSpacing: 0.3, textTransform: 'uppercase', marginBottom: 8 }}>Chỉ số rủi ro lũ</div>
-          {FLOOD_LEGEND.map((fl, i) => (
-            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 5 }}>
-              <span style={{ width: 13, height: 13, borderRadius: 4, background: fl.c, flex: 'none' }} />
-              <span style={{ fontSize: 11.5, color: '#3A3F47', flex: 1 }}>{fl.label}</span>
-              <span style={{ fontSize: 10.5, color: '#9AA0A6', fontFamily: "'IBM Plex Mono',monospace" }}>{fl.range}</span>
-            </div>
-          ))}
         </div>
       )}
 

@@ -143,12 +143,24 @@ function pickGeometry(
 
   // 3. A point + a buffer sized by hazard type and alert level.
   const pt = asPoint(g?.coordinates);
-  if (pt) {
-    const base = typeCode === 'STORM' ? radii.storm : radii.flood;
-    return { kind: 'point', lon: pt.lon, lat: pt.lat, radiusDeg: base * alertMult(alertLevel, radii) };
-  }
+  if (pt) return pointToGeom(pt.lon, pt.lat, typeCode, alertLevel, radii);
 
   return null;
+}
+
+/**
+ * A point footprint buffered by hazard type and alert level. Shared with the EONET
+ * parser so both size point-only hazards the same way.
+ */
+export function pointToGeom(
+  lon: number,
+  lat: number,
+  typeCode: 'STORM' | 'FLOOD',
+  alertLevel: string | undefined,
+  radii: RadiusConfig,
+): AffectedGeom {
+  const base = typeCode === 'STORM' ? radii.storm : radii.flood;
+  return { kind: 'point', lon, lat, radiusDeg: base * alertMult(alertLevel, radii) };
 }
 
 function asBbox(value: unknown): AffectedGeom | null {
@@ -197,7 +209,8 @@ function str(
   return undefined;
 }
 
-function parseDate(value: string | undefined): Date {
+/** Parse a date string, defaulting to now on missing/invalid input. Shared with the other source parsers. */
+export function parseDate(value: string | undefined): Date {
   if (!value) return new Date();
   const d = new Date(value);
   return Number.isNaN(d.getTime()) ? new Date() : d;

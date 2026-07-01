@@ -24,16 +24,17 @@ import {
 import {
   alertLevelToRiskStatus,
   assessRisk,
-  normalizeWeights,
   rainIndex,
   riverIndex,
   elevationIndex,
   riskStatusRank,
+  deriveWeightProfiles,
+  weightsForStation,
   RiskComponents,
   RiskVerdict,
-  RiskWeights,
+  RiskWeightProfiles,
+  RiskWeightDerivation,
   ThresholdTier,
-  DEFAULT_RISK_WEIGHTS,
 } from './risk-formula';
 
 /** Station attributes the engine needs to score it. */
@@ -98,7 +99,10 @@ interface AlertInsert {
 @Injectable()
 export class RiskEngineService implements OnModuleInit {
   private readonly logger = new Logger(RiskEngineService.name);
-  private readonly weights: RiskWeights;
+  // Per-group hazard weights, AHP-derived from the river-vs-rain judgment. The
+  // group is picked per station from its configured tiers (weightsForStation).
+  private readonly weightProfiles: RiskWeightProfiles;
+  private readonly weightDerivation: RiskWeightDerivation;
 
   constructor(
     private readonly dataSource: DataSource,
@@ -107,17 +111,10 @@ export class RiskEngineService implements OnModuleInit {
     private readonly realtime: RealtimeService,
     private readonly config: ConfigService,
   ) {
-    const rain = parseFloat(
-      this.config.get<string>('RISK_WEIGHT_RAIN') ?? '',
+    this.weightDerivation = deriveWeightProfiles(
+      parseFloat(this.config.get<string>('RISK_AHP_RIVER_VS_RAIN') ?? ''),
     );
-    const river = parseFloat(
-      this.config.get<string>('RISK_WEIGHT_RIVER') ?? '',
-    );
-    this.weights = normalizeWeights(
-      Number.isFinite(rain) && Number.isFinite(river)
-        ? { rain, river }
-        : DEFAULT_RISK_WEIGHTS,
-    );
+    this.weightProfiles = this.weightDerivation.profiles;
   }
 
   /** Subscribe the engine to the four triggers once the module is up. */
@@ -136,8 +133,13 @@ export class RiskEngineService implements OnModuleInit {
       // enough by recomputing from the latest snapshot. No-op if none yet.
       this.recomputeAll().then(() => undefined),
     );
+    const { river, rainOnly } = this.weightProfiles;
+    const { riverVsRainJudgment: j, riverGroupAhp: a } = this.weightDerivation;
     this.logger.log(
-      `Risk Engine online (weights rain=${this.weights.rain.toFixed(2)} river=${this.weights.river.toFixed(2)})`,
+      `Risk Engine online — AHP hazard weights (river:rain judgment=${j}, CR=${a.cr.toFixed(3)}` +
+        `${a.consistent ? '' : ' NOT CONSISTENT'}): ` +
+        `river-group rain=${river.rain.toFixed(3)}/river=${river.river.toFixed(3)}, ` +
+        `rain-only group rain=${rainOnly.rain.toFixed(3)}/river=${rainOnly.river.toFixed(3)}`,
     );
   }
 
@@ -251,6 +253,9 @@ export class RiskEngineService implements OnModuleInit {
       processed.push(station.id);
 
       const tiers = tiersByStation.get(station.id) ?? [];
+      // Weights are chosen by the station's group (river-monitored vs rain-only),
+      // resolved once per station since the tiers don't change across the horizon.
+      const weights = weightsForStation(tiers, this.weightProfiles);
       const pct = station.provinceId
         ? percentiles.get(station.provinceId)
         : undefined;
@@ -281,7 +286,7 @@ export class RiskEngineService implements OnModuleInit {
           rain3day,
           riverLevel: day.riverWaterLevel,
         };
-        const verdict = assessRisk(components, tiers as ThresholdTier[], this.weights);
+        const verdict = assessRisk(components, tiers as ThresholdTier[], weights);
 
         rows.push({
           stationId: station.id,

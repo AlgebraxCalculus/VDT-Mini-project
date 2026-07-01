@@ -1,14 +1,9 @@
 import { useEffect, useState } from 'react';
 import { useApp } from '../state/AppStateContext';
-import { STATIONS, EVENTS, forecast7d, riskMeta, floodLevel } from '../data/mockData';
+import { riskMeta, floodLevel } from '../lib/display';
 import { ApiError, apiListEvents, apiListRiskStations, apiListStations } from '../lib/api';
 import { exportReport } from '../lib/report';
 import type { RiskAssessment } from '../types';
-
-/** Initial active-event count from mock data — replaced by API 20's total. */
-const MOCK_ACTIVE_EVENTS = EVENTS.filter(
-  (e) => e.state === 'active' || e.state === 'monitor',
-).length;
 
 /** One rendered table row: a station with its 7-day risk sparkline + peak. */
 interface FcRow {
@@ -32,35 +27,6 @@ const sparkBar = (score: number) => ({ color: floodLevel(score).color, h: `${3 +
 function weekday(dateStr: string): string {
   const d = new Date(`${dateStr}T00:00:00`);
   return Number.isNaN(d.getTime()) ? dateStr.slice(5) : VN_WEEKDAYS[d.getDay()];
-}
-
-/** Mock rows — the initial render + fallback when API 36 is unavailable/empty. */
-function buildMockRows(): FcRow[] {
-  return STATIONS.map((s) => {
-    const score = s.riskScore ?? 0;
-    const f = forecast7d(score);
-    let peak = f[0];
-    let pi = 0;
-    f.forEach((d, i) => {
-      if (d.val > peak.val) {
-        peak = d;
-        pi = i;
-      }
-    });
-    const meta = riskMeta(s.riskStatus);
-    return {
-      id: s.id,
-      stationCode: s.stationCode,
-      name: s.name,
-      provinceName: s.province?.name ?? '—',
-      score,
-      spark: f.map((d) => sparkBar(d.val)),
-      peakDay: f[pi].day,
-      peakVal: peak.val,
-      riskColor: meta.color,
-      riskLabel: meta.label,
-    };
-  }).sort((a, b) => b.peakVal - a.peakVal);
 }
 
 /**
@@ -110,36 +76,33 @@ function buildApiRows(data: RiskAssessment[]): FcRow[] {
 export default function ForecastView() {
   const { patch, showToast } = useApp();
 
-  const [rows, setRows] = useState<FcRow[]>(buildMockRows);
-  const [live, setLive] = useState(false);
-  const [total, setTotal] = useState<number>(STATIONS.length);
-  const [activeEvents, setActiveEvents] = useState<number>(MOCK_ACTIVE_EVENTS);
+  const [rows, setRows] = useState<FcRow[]>([]);
+  const [loaded, setLoaded] = useState(false);
+  const [total, setTotal] = useState<number>(0);
+  const [activeEvents, setActiveEvents] = useState<number>(0);
   const [exporting, setExporting] = useState(false);
 
   // Load the at-risk station list from API 36 (grouped per station) + the total
-  // station count from Group C. Keep the mock rows already on screen if the call
-  // fails or returns nothing (the Risk Engine may not have run yet). setState
-  // only happens in async callbacks — never synchronously in the effect body.
+  // station count from Group C + the ongoing-event count from API 20. All start
+  // empty/zero and stay so on failure (the Risk Engine may not have run yet).
+  // setState only happens in async callbacks — never synchronously in the effect body.
   useEffect(() => {
     let cancelled = false;
     apiListRiskStations({ size: 100, sort: 'severity', includeLow: true })
       .then((res) => {
         if (cancelled) return;
-        const built = buildApiRows(res.data);
-        if (built.length > 0) {
-          setRows(built);
-          setLive(true);
-        }
+        setRows(buildApiRows(res.data));
+        setLoaded(true);
       })
       .catch(() => {
-        /* keep mock rows as fallback */
+        if (!cancelled) setLoaded(true);
       });
     apiListStations({ size: 1 })
       .then((res) => {
         if (!cancelled) setTotal(res.total);
       })
       .catch(() => {
-        /* keep mock count as fallback */
+        /* leave total at 0 on failure */
       });
     // API 20 — count of ongoing events (KPI "Sự kiện đang hoạt động"). Only the
     // total is needed, so request a single row.
@@ -148,7 +111,7 @@ export default function ForecastView() {
         if (!cancelled) setActiveEvents(res.total);
       })
       .catch(() => {
-        /* keep mock count as fallback */
+        /* leave active-event count at 0 on failure */
       });
     return () => {
       cancelled = true;
@@ -179,6 +142,8 @@ export default function ForecastView() {
 
   const fcHigh = rows.filter((r) => r.peakVal >= 50).length;
   const fcVeryHigh = rows.filter((r) => r.peakVal >= 70).length;
+  // True once API 36 has returned at least one at-risk station.
+  const liveData = loaded && rows.length > 0;
 
   return (
     <div style={{ position: 'absolute', inset: 0, overflow: 'auto', padding: '24px 28px' }} className="fws-fade">
@@ -210,10 +175,10 @@ export default function ForecastView() {
           <div style={{ fontSize: 14, fontWeight: 700 }}>Danh sách trạm nguy cơ ngập</div>
           <span style={{ fontSize: 12, color: '#9AA0A6' }}>· sắp xếp theo chỉ số rủi ro</span>
           <span
-            title={live ? 'Đang lấy từ API /risk/stations' : 'Risk Engine chưa có dữ liệu — đang hiển thị dữ liệu mẫu'}
-            style={{ fontSize: 11, fontWeight: 700, color: live ? '#16794A' : '#6B7280', background: live ? '#F3FBF6' : '#F1F2F4', border: `1px solid ${live ? '#CDEBD8' : '#E2E5EA'}`, padding: '2px 8px', borderRadius: 7 }}
+            title={loaded ? 'Đang lấy từ API /risk/stations' : 'Đang tải dữ liệu nguy cơ…'}
+            style={{ fontSize: 11, fontWeight: 700, color: liveData ? '#16794A' : '#6B7280', background: liveData ? '#F3FBF6' : '#F1F2F4', border: `1px solid ${liveData ? '#CDEBD8' : '#E2E5EA'}`, padding: '2px 8px', borderRadius: 7 }}
           >
-            {live ? 'Dữ liệu trực tiếp' : 'Dữ liệu mẫu'}
+            {!loaded ? 'Đang tải…' : liveData ? 'Dữ liệu trực tiếp' : 'Chưa có dữ liệu'}
           </span>
           <div style={{ flex: 1 }} />
           <button
@@ -261,6 +226,11 @@ export default function ForecastView() {
               </span>
             </button>
           ))}
+          {rows.length === 0 && (
+            <div style={{ textAlign: 'center', color: '#9AA0A6', fontSize: 13, padding: '28px 0' }}>
+              {loaded ? 'Chưa có trạm nguy cơ trong 5–7 ngày tới.' : 'Đang tải dữ liệu nguy cơ…'}
+            </div>
+          )}
         </div>
         <div style={{ height: 24 }} />
       </div>

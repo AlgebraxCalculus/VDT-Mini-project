@@ -109,9 +109,12 @@ export function renderHtml(table: ReportTable): string {
   .kpi { border: 1px solid #E8EAEE; border-radius: 10px; padding: 10px 16px; min-width: 120px; }
   .kpi-v { font-size: 22px; font-weight: 800; color: #EE0033; }
   .kpi-l { font-size: 11px; color: #6B7280; margin-top: 2px; text-transform: uppercase; letter-spacing: .3px; }
-  table { width: 100%; border-collapse: collapse; font-size: 11px; }
-  th { background: #FAFBFC; text-align: left; padding: 7px 9px; border-bottom: 2px solid #EEF0F3; color: #6B7280; text-transform: uppercase; font-size: 10px; letter-spacing: .2px; }
-  td { padding: 6px 9px; border-bottom: 1px solid #F2F3F5; }
+  /* table-layout: fixed + border-collapse: separate keep large (10k-row) reports
+     fast to lay out and print: the engine no longer measures every cell to size
+     columns (auto layout) nor runs the costly collapsed-border algorithm. */
+  table { width: 100%; table-layout: fixed; border-collapse: separate; border-spacing: 0; font-size: 11px; }
+  th { background: #FAFBFC; text-align: left; padding: 7px 9px; border-bottom: 2px solid #EEF0F3; color: #6B7280; text-transform: uppercase; font-size: 10px; letter-spacing: .2px; word-break: break-word; }
+  td { padding: 6px 9px; border-bottom: 1px solid #F2F3F5; vertical-align: top; word-break: break-word; overflow-wrap: anywhere; }
   tr:nth-child(even) td { background: #FCFCFD; }
   footer { margin-top: 18px; color: #9AA0A6; font-size: 10.5px; text-align: right; }
   @media print { body { margin: 0; } @page { size: A4; margin: 14mm; } }

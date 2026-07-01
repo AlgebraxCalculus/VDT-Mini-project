@@ -1,6 +1,5 @@
 import { useEffect, useState } from 'react';
 import { useApp } from '../state/AppStateContext';
-import { NOTIFS } from '../data/mockData';
 import { PAGE_TITLES, ROLE_COLOR } from '../lib/role';
 import { apiGetIntegrationsHealth, apiRefreshWeather, ApiError } from '../lib/api';
 import type { Role } from '../types';
@@ -28,7 +27,7 @@ const CHIP: Record<ChipState, { dot: string; text: string; bg: string; border: s
 
 export default function Topbar() {
   const { state, patch, doSync, showToast } = useApp();
-  const { route, role, syncing, notifOpen } = state;
+  const { route, role, syncing } = state;
 
   const [title, subtitle] = PAGE_TITLES[route];
 
@@ -117,53 +116,6 @@ export default function Topbar() {
           </button>
         </>
       )}
-
-      <div style={{ position: 'relative' }}>
-        <button
-          onClick={() => patch((s) => ({ notifOpen: !s.notifOpen }))}
-          style={{ position: 'relative', width: 38, height: 38, border: '1.5px solid #E2E5EA', background: '#fff', borderRadius: 9, cursor: 'pointer', display: 'flex', alignItems: 'center', justifyContent: 'center', color: '#4A4F57' }}
-        >
-          <svg width="19" height="19" viewBox="0 0 24 24" fill="none">
-            <path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6Z" stroke="currentColor" strokeWidth="1.7" strokeLinejoin="round" />
-            <path d="M10 19a2 2 0 0 0 4 0" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" />
-          </svg>
-          <span style={{ position: 'absolute', top: -5, right: -5, minWidth: 18, height: 18, padding: '0 4px', borderRadius: 9, background: '#EE0033', color: '#fff', fontSize: 10.5, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center', border: '2px solid #fff' }}>
-            {NOTIFS.length}
-          </span>
-        </button>
-
-        {notifOpen && (
-          <>
-            <div onClick={() => patch({ notifOpen: false })} style={{ position: 'fixed', inset: 0, zIndex: 990 }} />
-            <div className="fws-fade" style={{ position: 'absolute', top: 46, right: 0, width: 380, background: '#fff', borderRadius: 14, boxShadow: '0 16px 44px rgba(16,20,30,.22)', zIndex: 1000, overflow: 'hidden', border: '1px solid #EEF0F3' }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '14px 16px', borderBottom: '1px solid #EEF0F3' }}>
-                <div style={{ fontSize: 14.5, fontWeight: 800 }}>Thông báo</div>
-                <span style={{ fontSize: 11.5, fontWeight: 700, color: '#EE0033', background: '#FDE7EB', padding: '3px 9px', borderRadius: 7 }}>{NOTIFS.length} mới</span>
-              </div>
-              <div style={{ maxHeight: 420, overflowY: 'auto' }}>
-                {NOTIFS.map((n, i) => (
-                  <div key={i} style={{ display: 'flex', gap: 11, padding: '13px 16px', borderBottom: '1px solid #F2F3F5', cursor: 'pointer' }}>
-                    <span style={{ width: 34, height: 34, borderRadius: 9, flex: 'none', background: n.bg, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                      <svg width="17" height="17" viewBox="0 0 24 24" fill="none">
-                        <path d="M12 4l9 16H3L12 4Z" stroke={n.color} strokeWidth="1.7" strokeLinejoin="round" />
-                        <path d="M12 10v4m0 3v.4" stroke={n.color} strokeWidth="1.8" strokeLinecap="round" />
-                      </svg>
-                    </span>
-                    <div style={{ flex: 1, minWidth: 0 }}>
-                      <div style={{ fontSize: 13, fontWeight: 700, lineHeight: 1.35 }}>{n.title}</div>
-                      <div style={{ fontSize: 12, color: '#5B626B', lineHeight: 1.45, marginTop: 3 }}>{n.body}</div>
-                      <div style={{ fontSize: 11, color: '#9AA0A6', marginTop: 5, fontFamily: "'IBM Plex Mono',monospace" }}>{n.time}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <button style={{ width: '100%', padding: 12, border: 'none', background: '#FAFBFC', borderTop: '1px solid #EEF0F3', fontSize: 12.5, fontWeight: 700, color: '#EE0033', cursor: 'pointer' }}>
-                Xem tất cả thông báo
-              </button>
-            </div>
-          </>
-        )}
-      </div>
 
       <div
         title="Vai trò đăng nhập hiện tại"

@@ -1,10 +1,12 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Cron } from '@nestjs/schedule';
 import { DataSource, EntityManager } from 'typeorm';
 import { EventBusService } from '../../../event-bus/event-bus.service';
 import { EVENT_CHANNELS } from '../../../event-bus/event-bus.constants';
-import { GdacsProvider } from '../../weather/providers/gdacs.provider';
+import { DISASTER_PROVIDERS } from '../../weather/weather.constants';
+import { DisasterProvider } from '../../weather/providers/weather-provider.interface';
+import { WeatherSource } from '../../weather/entities/weather-snapshot.entity';
 import {
   AffectedGeom,
   DEFAULT_RADIUS_CONFIG,
@@ -12,6 +14,40 @@ import {
   parseGdacsEvents,
   RadiusConfig,
 } from './gdacs.parser';
+import { parseEonetEvents } from './eonet.parser';
+import { parseReliefWebEvents } from './reliefweb.parser';
+
+/**
+ * Event-ingestion source order. GDACS is primary; EONET is the geometry-bearing
+ * fallback; ReliefWeb (country-level, no geometry → coarse scope) is last resort.
+ * Note this differs from the weather module's disaster chain (GDACS→ReliefWeb→
+ * EONET): for *event scope* a precise footprint matters, so EONET outranks ReliefWeb.
+ */
+const SOURCE_PRIORITY: WeatherSource[] = [
+  WeatherSource.GDACS,
+  WeatherSource.EONET,
+  WeatherSource.RELIEFWEB,
+];
+
+/**
+ * `event_code` prefix per source. Doubles as (a) the set of sources that have an
+ * ingestion parser and (b) the filter that scopes the stale-close sweep to just
+ * the source that produced the current feed.
+ */
+const SOURCE_PREFIX: Partial<Record<WeatherSource, string>> = {
+  [WeatherSource.GDACS]: 'GDACS-',
+  [WeatherSource.EONET]: 'EONET-',
+  [WeatherSource.RELIEFWEB]: 'RW-',
+};
+
+/** All auto-ingested event-code prefixes, for the age-based safety sweep. */
+const ALL_AUTO_PREFIXES = Object.values(SOURCE_PREFIX).map((p) => `${p}%`);
+
+/** Priority rank of a source (unknown → last). */
+function priorityIndex(code: WeatherSource): number {
+  const i = SOURCE_PRIORITY.indexOf(code);
+  return i === -1 ? Number.MAX_SAFE_INTEGER : i;
+}
 
 /** Per-event outcome of one upsert pass. */
 type UpsertResult =
@@ -27,9 +63,9 @@ export interface IngestSummary {
 
 /**
  * Group D — automatic disaster-event tracking. Replaces the removed manual create
- * (API 22): nobody declares events by hand. A cron pulls the GDACS feed (the
- * primary disaster source; ReliefWeb/EONET fallback is a later step), keeps only
- * VN-relevant STORM/FLOOD hazards, and for each one:
+ * (API 22): nobody declares events by hand. A cron pulls the disaster feed through
+ * a fallback chain (GDACS → EONET → ReliefWeb; the first configured source that
+ * responds wins), keeps only VN-relevant STORM/FLOOD hazards, and for each one:
  *
  *   1. upserts `disaster_events` keyed by a GDACS-derived `event_code` (dedupe);
  *   2. freezes scope into the N-N tables (`event_provinces` with a clipped impact
@@ -48,7 +84,8 @@ export class EventIngestionService {
   private readonly radii: RadiusConfig;
 
   constructor(
-    private readonly gdacs: GdacsProvider,
+    @Inject(DISASTER_PROVIDERS)
+    private readonly providers: DisasterProvider[],
     private readonly dataSource: DataSource,
     private readonly eventBus: EventBusService,
     private readonly config: ConfigService,
@@ -65,22 +102,18 @@ export class EventIngestionService {
     }
   }
 
-  /** Pull → normalize → upsert + scope → close stale. Returns a summary. */
+  /** Pull (with fallback) → normalize → upsert + scope → close stale. Returns a summary. */
   async run(): Promise<IngestSummary> {
     const summary: IngestSummary = { created: 0, updated: 0, scopedStations: 0, closed: 0 };
 
-    let raw: unknown;
-    try {
-      raw = await this.gdacs.fetchEvents();
-    } catch (err) {
-      // A fetch failure must not trigger the close-sweep (would wrongly close
-      // every ongoing event), so bail out before it.
-      this.logger.warn(`GDACS fetch failed, skipping run: ${(err as Error).message}`);
-      return summary;
-    }
+    const fetched = await this.fetchWithFallback();
+    // Whole chain down/unconfigured → do NOT run the close-sweep (it would wrongly
+    // close every ongoing event just because no source answered this run).
+    if (!fetched) return summary;
 
-    const events = parseGdacsEvents(raw, this.radii);
-    this.logger.log(`GDACS: ${events.length} STORM/FLOOD hazard(s) in feed`);
+    const { raw, source } = fetched;
+    const events = this.normalize(source, raw);
+    this.logger.log(`${source}: ${events.length} STORM/FLOOD hazard(s) in feed`);
 
     const seen = new Set<string>();
     for (const ev of events) {
@@ -96,13 +129,72 @@ export class EventIngestionService {
       }
     }
 
-    summary.closed = await this.closeStale(seen);
+    // Immediate close of active-source events that dropped out of this feed, plus a
+    // time-based safety net for zombie events left by a *different* source (e.g. an
+    // EONET event created during a GDACS outage that GDACS never lists once back).
+    summary.closed = await this.closeStale(seen, source);
+    summary.closed += await this.closeStaleByAge();
 
     this.logger.log(
-      `disaster ingest done: +${summary.created} new, ${summary.updated} updated, ` +
+      `disaster ingest done via ${source}: +${summary.created} new, ${summary.updated} updated, ` +
         `${summary.scopedStations} stations scoped, ${summary.closed} closed`,
     );
     return summary;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Source fetch (fallback chain) + normalization
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Try each configured source in priority order (GDACS → EONET → ReliefWeb) and
+   * return the first that answers, or null if every source failed or is
+   * unconfigured. Sources without an ingestion parser (no {@link SOURCE_PREFIX})
+   * are skipped even if present in the injected chain.
+   */
+  private async fetchWithFallback(): Promise<{
+    raw: unknown;
+    source: WeatherSource;
+  } | null> {
+    const ordered = [...this.providers].sort(
+      (a, b) => priorityIndex(a.code) - priorityIndex(b.code),
+    );
+    const errors: string[] = [];
+    for (const p of ordered) {
+      if (!SOURCE_PREFIX[p.code]) continue; // no ingestion parser for this source
+      if (!p.isConfigured()) {
+        this.logger.debug(`skip ${p.code} (not configured)`);
+        continue;
+      }
+      try {
+        const raw = await p.fetchEvents();
+        return { raw, source: p.code };
+      } catch (err) {
+        const msg = `${p.code}: ${(err as Error).message}`;
+        this.logger.warn(`disaster source failed, trying next — ${msg}`);
+        errors.push(msg);
+      }
+    }
+    this.logger.warn(
+      errors.length
+        ? `all disaster sources failed, skipping run [${errors.join(' | ')}]`
+        : 'no disaster source configured, skipping run',
+    );
+    return null;
+  }
+
+  /** Normalize a source's raw payload into the common {@link NormalizedDisaster} shape. */
+  private normalize(source: WeatherSource, raw: unknown): NormalizedDisaster[] {
+    switch (source) {
+      case WeatherSource.GDACS:
+        return parseGdacsEvents(raw, this.radii);
+      case WeatherSource.EONET:
+        return parseEonetEvents(raw, this.radii);
+      case WeatherSource.RELIEFWEB:
+        return parseReliefWebEvents(raw);
+      default:
+        return [];
+    }
   }
 
   // ---------------------------------------------------------------------------
@@ -206,22 +298,55 @@ export class EventIngestionService {
   // Lifecycle: close events that left the feed
   // ---------------------------------------------------------------------------
 
-  /** Close ONGOING GDACS events absent from this run's feed. Skipped if nothing was seen (avoids closing on an empty/misconfigured feed). */
-  private async closeStale(seen: Set<string>): Promise<number> {
+  /**
+   * Close ONGOING events *from the source that produced this feed* that are absent
+   * from it (the hazard ended). Scoped by the source's event_code prefix so a
+   * failover to another source never closes the previous source's events. Skipped
+   * when nothing VN-relevant was seen (avoids closing on an empty/misconfigured feed).
+   */
+  private async closeStale(seen: Set<string>, source: WeatherSource): Promise<number> {
+    const prefix = SOURCE_PREFIX[source];
+    if (!prefix) return 0;
     if (seen.size === 0) {
-      this.logger.debug('closeStale: no VN-relevant events this run — skipping sweep');
+      this.logger.debug(`closeStale: no VN-relevant ${source} events this run — skipping sweep`);
       return 0;
     }
     const rows = await this.dataSource.query<{ id: string }[]>(
       `UPDATE disaster_events
           SET status = 'CLOSED', end_time = now(), updated_at = now()
-        WHERE event_code LIKE 'GDACS-%'
+        WHERE event_code LIKE $2
           AND status = 'ONGOING'
           AND event_code <> ALL($1)
         RETURNING id`,
-      [[...seen]],
+      [[...seen], `${prefix}%`],
     );
     for (const r of rows) this.publishClosed(String(r.id));
+    return rows.length;
+  }
+
+  /**
+   * Safety net: close any ONGOING auto-ingested event not refreshed within the
+   * staleness window (`DISASTER_STALE_CLOSE_HOURS`, default 24). Every upsert bumps
+   * updated_at, so this only catches events no source has confirmed for a while —
+   * chiefly zombies left by a fallback source that is no longer the active one.
+   * Set the env to 0 to disable.
+   */
+  private async closeStaleByAge(): Promise<number> {
+    const hours = parseFloat(this.config.get<string>('DISASTER_STALE_CLOSE_HOURS') ?? '24');
+    if (!Number.isFinite(hours) || hours <= 0) return 0;
+    const rows = await this.dataSource.query<{ id: string }[]>(
+      `UPDATE disaster_events
+          SET status = 'CLOSED', end_time = now(), updated_at = now()
+        WHERE status = 'ONGOING'
+          AND event_code LIKE ANY ($1)
+          AND updated_at < now() - make_interval(mins => $2)
+        RETURNING id`,
+      [ALL_AUTO_PREFIXES, Math.round(hours * 60)],
+    );
+    for (const r of rows) this.publishClosed(String(r.id));
+    if (rows.length) {
+      this.logger.log(`closeStaleByAge: closed ${rows.length} zombie event(s) (>${hours}h stale)`);
+    }
     return rows.length;
   }
 

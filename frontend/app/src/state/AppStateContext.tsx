@@ -21,7 +21,7 @@ export interface AppState {
   selectedId: number | null;
   searchText: string;
   scrubDay: number;
-  scrubDayCount: number; // length of the forecast scrubber (5–7 live, 7 for mock)
+  scrubDayCount: number; // length of the forecast scrubber (5–7, from the province forecast)
   playing: boolean;
   syncing: boolean;
   mapLayout: MapLayout;
@@ -35,7 +35,6 @@ export interface AppState {
   eventDrawerId: string | null;
   evForm: EventForm | null;
   acctForm: AccountForm | null;
-  notifOpen: boolean;
   toast: string | null;
 }
 
@@ -63,7 +62,6 @@ const initialState: AppState = {
   eventDrawerId: null,
   evForm: null,
   acctForm: null,
-  notifOpen: false,
   toast: null,
 };
 

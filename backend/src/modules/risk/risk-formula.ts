@@ -1,5 +1,6 @@
 import { RiskSeverity } from './entities/station-risk-assessment.entity';
 import { RiskStatus } from '../stations/entities/station.entity';
+import { ahpFromJudgments, AhpResult, SAATY } from './risk-ahp';
 
 /**
  * Pure, side-effect-free implementation of the four-layer flood-risk model
@@ -21,8 +22,85 @@ export interface RiskWeights {
   river: number;
 }
 
-/** Default AHP-derived weights for a generic (mixed) station group. Tunable via env. */
-export const DEFAULT_RISK_WEIGHTS: RiskWeights = { rain: 0.4, river: 0.6 };
+/**
+ * Hazard criteria for the Layer-2 weighting, in AHP matrix order. Only these two
+ * are AHP-weighted; elevation stays a separate vulnerability multiplier (see
+ * {@link riskScore}), not a weighted-sum criterion.
+ */
+export const HAZARD_CRITERIA = ['rain', 'river'] as const;
+const RAIN = 0;
+const RIVER = 1;
+
+/**
+ * The single domain judgment behind the river-group weights: how many times more
+ * important the river stage is than local rainfall for flooding. Grounded in
+ * hydrology — the river level is the proximate, integrated indicator (it already
+ * embodies upstream rain + catchment runoff + antecedent wetness and *is* the
+ * flood), whereas local rainfall is a leading but indirect signal that drainage
+ * and soil can absorb. Default = Saaty "equal-to-moderate" (2): the river is
+ * weakly more important than rain. Tunable via env `RISK_AHP_RIVER_VS_RAIN`.
+ */
+export const DEFAULT_RIVER_VS_RAIN_JUDGMENT: number = SAATY.EQUAL_TO_MODERATE;
+
+/** Per-group hazard weights (Layer 2), each summing to 1. See {@link deriveWeightProfiles}. */
+export interface RiskWeightProfiles {
+  /** River-monitored stations (≥1 water-level tier): full rain-vs-river AHP. */
+  river: RiskWeights;
+  /** Tier-less stations: river is non-applicable (V≡0), so rain carries all weight. */
+  rainOnly: RiskWeights;
+}
+
+/** The group a station is classified into. */
+export type StationGroupKey = keyof RiskWeightProfiles;
+
+/** AHP-derived profiles plus the audit trail (judgment + consistency) for logging. */
+export interface RiskWeightDerivation {
+  profiles: RiskWeightProfiles;
+  /** The river-group AHP result (weights, λmax, CI, CR, consistent). */
+  riverGroupAhp: AhpResult;
+  /** The river-vs-rain judgment actually used (after the positive-finite guard). */
+  riverVsRainJudgment: number;
+}
+
+/**
+ * Derive the per-group hazard weights via AHP from one interpretable judgment.
+ *
+ *   • river group — a 2-criteria AHP over {rain, river}. Both signals apply, so the
+ *     weights come straight from the priority vector (a 2×2 reciprocal matrix is
+ *     consistent by construction, CR = 0).
+ *   • rain-only group — for tier-less stations the river is a *non-applicable*
+ *     criterion (riverIndex is always 0), so AHP runs over the single applicable
+ *     criterion {rain}: its normalized priority is 1.0 and river gets 0.0. This is
+ *     a structural fact (not a preference) and also stops such a station's score
+ *     from being capped at ~w_rain·R.
+ */
+export function deriveWeightProfiles(riverVsRainJudgment: number): RiskWeightDerivation {
+  const j =
+    Number.isFinite(riverVsRainJudgment) && riverVsRainJudgment > 0
+      ? riverVsRainJudgment
+      : DEFAULT_RIVER_VS_RAIN_JUDGMENT;
+
+  // a(rain, river) = 1/j because the river is judged j× as important as rain.
+  const riverGroupAhp = ahpFromJudgments(HAZARD_CRITERIA.length, [
+    { i: RAIN, j: RIVER, a: 1 / j },
+  ]);
+
+  return {
+    profiles: {
+      river: { rain: riverGroupAhp.weights[RAIN], river: riverGroupAhp.weights[RIVER] },
+      rainOnly: { rain: 1, river: 0 },
+    },
+    riverGroupAhp,
+    riverVsRainJudgment: j,
+  };
+}
+
+/** Profiles for the default judgment — a convenient fallback for callers. */
+export const DEFAULT_RISK_WEIGHT_PROFILES: RiskWeightProfiles =
+  deriveWeightProfiles(DEFAULT_RIVER_VS_RAIN_JUDGMENT).profiles;
+
+/** AHP-derived reference weights for a river-monitored station (the default judgment). */
+export const DEFAULT_RISK_WEIGHTS: RiskWeights = DEFAULT_RISK_WEIGHT_PROFILES.river;
 
 /** One flood-threshold tier for a station, ascending by alert level (I/II/III). */
 export interface ThresholdTier {
@@ -62,6 +140,22 @@ export function normalizeWeights(w: RiskWeights): RiskWeights {
   const total = w.rain + w.river;
   if (total <= 0) return { ...DEFAULT_RISK_WEIGHTS };
   return { rain: w.rain / total, river: w.river / total };
+}
+
+/**
+ * Classify a station into a weight group from its configured tiers: a station with
+ * ≥1 water-level tier is river-monitored, otherwise it is rain-driven.
+ */
+export function classifyStationGroup(tiers: ThresholdTier[]): StationGroupKey {
+  return tiers.length > 0 ? 'river' : 'rainOnly';
+}
+
+/** Resolve the (already-normalized) hazard weights for a station from its group. */
+export function weightsForStation(
+  tiers: ThresholdTier[],
+  profiles: RiskWeightProfiles,
+): RiskWeights {
+  return profiles[classifyStationGroup(tiers)];
 }
 
 // ---------------------------------------------------------------------------

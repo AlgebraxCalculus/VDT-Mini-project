@@ -11,9 +11,10 @@ import { WeatherModule } from '../weather/weather.module';
 
 /**
  * Group D — disaster events. Manual creation was removed; events are tracked
- * automatically by {@link EventIngestionService} from the GDACS feed (it reuses
- * GdacsProvider exported by {@link WeatherModule}) and writes the N-N scope via
- * raw PostGIS. The internal controller exposes a scheduler-only manual trigger.
+ * automatically by {@link EventIngestionService} from the disaster fallback chain
+ * GDACS → EONET → ReliefWeb (it injects the `DISASTER_PROVIDERS` collection
+ * exported by {@link WeatherModule}) and writes the N-N scope via raw PostGIS. The
+ * internal controller exposes a scheduler-only manual trigger.
  */
 @Module({
   imports: [

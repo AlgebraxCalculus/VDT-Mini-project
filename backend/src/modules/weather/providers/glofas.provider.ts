@@ -121,7 +121,7 @@ export class GlofasProvider implements HealthCheckable {
     date = new Date(),
   ): Promise<Map<number, RiverDaily[]>> {
     if (!this.pat) throw new Error('GloFAS: EWDS_PAT not configured');
-    const jobId = await this.submit(date);
+    const jobId = await this.submitWithDateFallback(date);
     this.logger.log(`GloFAS job ${jobId} submitted; polling…`);
     await this.pollUntilDone(jobId);
     const href = await this.resolveAsset(jobId);
@@ -134,6 +134,48 @@ export class GlofasProvider implements HealthCheckable {
     } finally {
       await rm(dir, { recursive: true, force: true }).catch(() => undefined);
     }
+  }
+
+  /**
+   * Submit the run, walking the date back day-by-day until EWDS accepts it.
+   * GloFAS operational forecast publishes with ~1 day latency, so the current
+   * day's run is usually not available yet (EWDS answers 400 "no valid
+   * combination of values" — the date is the only varying input here, the
+   * Vietnam `area` bbox and the rest are constant and known-valid). We retry
+   * earlier dates rather than fail the whole daily pull. Genuinely malformed
+   * requests (non-date 400s, auth, 5xx) are rethrown immediately.
+   */
+  private async submitWithDateFallback(date: Date): Promise<string> {
+    const maxLookback = parseInt(
+      this.config.get<string>('GLOFAS_MAX_LOOKBACK_DAYS') ?? '4',
+      10,
+    );
+    let lastErr: Error | undefined;
+    for (let back = 0; back <= maxLookback; back++) {
+      const d = new Date(date);
+      d.setUTCDate(d.getUTCDate() - back);
+      try {
+        return await this.submit(d);
+      } catch (err) {
+        const msg = (err as Error).message;
+        if (/HTTP 400/.test(msg) && /valid combination/i.test(msg)) {
+          this.logger.warn(
+            `GloFAS: run ${d.toISOString().slice(0, 10)} not available yet — trying the previous day`,
+          );
+          lastErr = err as Error;
+          continue;
+        }
+        throw err; // not a date-availability 400 — surface it
+      }
+    }
+    throw (
+      lastErr ??
+      new Error(
+        `GloFAS: no available forecast run within ${maxLookback} days of ${date
+          .toISOString()
+          .slice(0, 10)}`,
+      )
+    );
   }
 
   private async submit(date: Date): Promise<string> {

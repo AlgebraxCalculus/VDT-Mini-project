@@ -252,19 +252,35 @@ export class WeatherIngestionService {
    * column is NULL (forecast providers don't supply river). Left as-is that would
    * collapse the Risk Engine's V index — and thus severity — back to LOW until the
    * next GloFAS run. To avoid that *without a schema change*, copy the river stage
-   * from the most recent prior forecast snapshot that has river data, matched per
-   * station + calendar day. Runs inside the ingest transaction so the snapshot is
-   * never published river-less when carry-forward data exists; the next GloFAS run
+   * from recent prior forecast snapshots that have river data, matched per station
+   * + calendar day. Runs inside the ingest transaction so the snapshot is never
+   * published river-less when carry-forward data exists; the next GloFAS run
    * overwrites these carried values with fresh discharge-derived stages.
    *
-   * No-op (cheap single-row probe) when no prior river data exists yet. Province
-   * rows (station_id NULL) are not carried — GloFAS only enriches station rows.
+   * No-op when no prior river data exists yet. Province rows (station_id NULL) are
+   * not carried — GloFAS only enriches station rows.
+   *
+   * Two passes, both scanning a bounded recent window (not a single source
+   * snapshot):
+   *  1. Same-day copy: for each (station, calendar-day), take the value from the
+   *     newest prior snapshot that actually holds river for THAT day. Scanning per
+   *     day — rather than pinning one source snapshot — is what keeps the distinct
+   *     day-to-day forecast shape intact: when the immediately-prior snapshot came
+   *     from a short-horizon provider (e.g. WeatherAPI's ~3 days), a single-source
+   *     carry would leave the far days with no same-day match, and Pass 2 would then
+   *     smear one boundary value across the whole tail (today distinct, every future
+   *     day identical). Per-day lookup instead reaches back past the short-horizon
+   *     snapshot to the last 7-day one that still had that day.
+   *  2. Persistence fill: any day still NULL (genuinely beyond every prior river
+   *     horizon) inherits the station's last-known stage — its most recent value at
+   *     the latest forecast_time — so the far end never erodes back to NULL between
+   *     daily GloFAS runs.
    */
   private async carryForwardRiver(
     manager: EntityManager,
     snapshotId: string,
   ): Promise<void> {
-    // Most recent prior forecast snapshot that actually holds river data.
+    // Bail early if no prior forecast snapshot holds river data at all.
     const src = await manager.query<{ snapshot_id: string }[]>(
       `SELECT prev.snapshot_id
          FROM weather_forecasts prev
@@ -276,22 +292,62 @@ export class WeatherIngestionService {
         LIMIT 1`,
       [snapshotId],
     );
-    const sourceId = src[0]?.snapshot_id;
-    if (!sourceId) return; // no prior river data yet — nothing to carry
+    if (!src[0]?.snapshot_id) return; // no prior river data yet — nothing to carry
 
+    // Pass 1 — per (station, calendar-day) copy from the newest prior snapshot that
+    // has river for that day. The 3-day lookback + forecast_time >= today bound the
+    // scan; DISTINCT ON keeps only the freshest value per day, skipping any
+    // short-horizon (e.g. WeatherAPI) snapshot that lacks the far days.
     await manager.query(
       `UPDATE weather_forecasts cur
-          SET river_water_level = prev.river_water_level
-         FROM weather_forecasts prev
-        WHERE prev.snapshot_id = $1
-          AND cur.snapshot_id = $2
-          AND cur.station_id = prev.station_id
-          AND (cur.forecast_time)::date = (prev.forecast_time)::date
+          SET river_water_level = src.level
+         FROM (
+           SELECT DISTINCT ON (prev.station_id, (prev.forecast_time)::date)
+                  prev.station_id            AS station_id,
+                  (prev.forecast_time)::date AS d,
+                  prev.river_water_level     AS level
+             FROM weather_forecasts prev
+             JOIN weather_snapshots ws ON ws.id = prev.snapshot_id
+            WHERE prev.river_water_level IS NOT NULL
+              AND prev.station_id IS NOT NULL
+              AND ws.id < $1
+              AND ws.fetched_at >= now() - interval '3 days'
+              AND ws.source_code NOT IN ('GDACS','EONET','ReliefWeb','GloFAS')
+              AND (prev.forecast_time)::date >= CURRENT_DATE
+            ORDER BY prev.station_id, (prev.forecast_time)::date, ws.id DESC
+         ) src
+        WHERE cur.snapshot_id = $1
+          AND cur.station_id = src.station_id
+          AND (cur.forecast_time)::date = src.d
           AND cur.river_water_level IS NULL`,
-      [sourceId, snapshotId],
+      [snapshotId],
+    );
+
+    // Pass 2 — persistence fill for days no prior snapshot ever covered: each
+    // station's last-known stage (newest snapshot, latest forecast_time).
+    await manager.query(
+      `UPDATE weather_forecasts cur
+          SET river_water_level = last.level
+         FROM (
+           SELECT DISTINCT ON (prev.station_id)
+                  prev.station_id        AS station_id,
+                  prev.river_water_level AS level
+             FROM weather_forecasts prev
+             JOIN weather_snapshots ws ON ws.id = prev.snapshot_id
+            WHERE prev.river_water_level IS NOT NULL
+              AND prev.station_id IS NOT NULL
+              AND ws.id < $1
+              AND ws.fetched_at >= now() - interval '3 days'
+              AND ws.source_code NOT IN ('GDACS','EONET','ReliefWeb','GloFAS')
+            ORDER BY prev.station_id, ws.id DESC, prev.forecast_time DESC
+         ) last
+        WHERE cur.snapshot_id = $1
+          AND cur.station_id = last.station_id
+          AND cur.river_water_level IS NULL`,
+      [snapshotId],
     );
     this.logger.log(
-      `Snapshot ${snapshotId}: carried river_water_level forward from snapshot ${sourceId}`,
+      `Snapshot ${snapshotId}: carried river_water_level forward (per-day copy + persistence fill)`,
     );
   }
 

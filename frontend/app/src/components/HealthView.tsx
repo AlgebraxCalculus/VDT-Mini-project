@@ -1,6 +1,12 @@
 import { useCallback, useEffect, useState } from 'react';
-import { JOBS } from '../data/mockData';
-import { apiGetIntegrationsHealth, ApiError, type SourceHealth } from '../lib/api';
+import {
+  apiGetIntegrationsHealth,
+  apiRefreshIntegrationsHealth,
+  apiGetRecentJobs,
+  ApiError,
+  type RecentJob,
+  type SourceHealth,
+} from '../lib/api';
 
 // Friendly VN label + description per backend source `code` (API 35 sends only the code).
 // Keys must match the WeatherSource codes in HEALTH_PROVIDERS (backend):
@@ -37,16 +43,50 @@ const fmtTime = (iso: string | null) =>
   iso ? new Date(iso).toLocaleTimeString('vi-VN', { hour: '2-digit', minute: '2-digit' }) : '—';
 const fmtErrRate = (r: number) => `${(r * 100).toFixed(1)}%`;
 
+// Friendly VN label per BullMQ queue (the backend sends the raw queue name).
+const QUEUE_LABEL: Record<RecentJob['queue'], string> = {
+  weather: 'Đồng bộ thời tiết',
+  reports: 'Xuất báo cáo',
+  'stations-import': 'Nhập trạm hàng loạt',
+};
+
+// state → [label, color, bg] for the status badge.
+const JOB_TONE: Record<RecentJob['state'], Tone> = {
+  active: ['Đang chạy', '#B45309', '#FEF3C7'],
+  completed: ['Hoàn tất', '#16A34A', '#ECFDF3'],
+  failed: ['Thất bại', '#EE0033', '#FDE7EB'],
+  waiting: ['Đang chờ', '#6B7280', '#F1F2F4'],
+  delayed: ['Đang chờ', '#6B7280', '#F1F2F4'],
+  paused: ['Tạm dừng', '#6B7280', '#F1F2F4'],
+  unknown: ['—', '#6B7280', '#F1F2F4'],
+};
+
+// The most relevant timestamp for a job, by lifecycle stage.
+const jobTime = (j: RecentJob) => fmtTime(j.finishedAt ?? j.startedAt ?? j.createdAt);
+
+// A short VN status line under the job title.
+function jobInfo(j: RecentJob): string {
+  if (j.state === 'active') return `Đang xử lý · ${j.progress}%`;
+  if (j.state === 'failed') return (j.failedReason ?? 'Tác vụ thất bại').slice(0, 90);
+  if (j.state === 'completed') return `Hoàn tất · ${j.queue}`;
+  if (j.state === 'waiting' || j.state === 'delayed') return 'Đang chờ trong hàng đợi';
+  return j.queue;
+}
+
 export default function HealthView() {
   const [sources, setSources] = useState<SourceHealth[] | null>(null);
+  const [jobs, setJobs] = useState<RecentJob[] | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const load = useCallback(async () => {
+  // `refresh` true → POST /integrations/health/refresh (re-probe every source now);
+  // false → GET the last cached results (used on mount, fast). The button below
+  // passes true so an admin can force a fresh check without waiting for the cron.
+  const load = useCallback(async (refresh = false) => {
     setLoading(true);
     setError(null);
     try {
-      setSources(await apiGetIntegrationsHealth());
+      setSources(await (refresh ? apiRefreshIntegrationsHealth() : apiGetIntegrationsHealth()));
     } catch (e) {
       setSources(null);
       if (e instanceof ApiError && e.status === 403)
@@ -57,6 +97,13 @@ export default function HealthView() {
       else setError('Đã xảy ra lỗi khi tải tình trạng hệ thống.');
     } finally {
       setLoading(false);
+    }
+    // Recent background jobs are non-critical — a failure just hides the panel
+    // and never blanks the health cards above.
+    try {
+      setJobs(await apiGetRecentJobs());
+    } catch {
+      setJobs(null);
     }
   }, []);
 
@@ -89,7 +136,7 @@ export default function HealthView() {
                   : `${okCount}/${total} nguồn ổn định · cập nhật lúc ${fmtTime(lastChecked)}`}
             </div>
           </div>
-          <button onClick={() => void load()} disabled={loading} style={{ height: 40, padding: '0 16px', border: 'none', background: '#EE0033', borderRadius: 10, fontSize: 13.5, fontWeight: 700, color: '#fff', cursor: loading ? 'default' : 'pointer', opacity: loading ? 0.6 : 1 }}>
+          <button onClick={() => void load(true)} disabled={loading} style={{ height: 40, padding: '0 16px', border: 'none', background: '#EE0033', borderRadius: 10, fontSize: 13.5, fontWeight: 700, color: '#fff', cursor: loading ? 'default' : 'pointer', opacity: loading ? 0.6 : 1 }}>
             {loading ? 'Đang kiểm tra…' : 'Kiểm tra lại tất cả'}
           </button>
         </div>
@@ -145,30 +192,43 @@ export default function HealthView() {
           </div>
         )}
 
-        {/* Tác vụ nền — chưa có endpoint backend (BullMQ chỉ trả 1 job theo id qua API 32);
-            giữ dữ liệu mẫu cho tới khi có API "danh sách job gần đây". */}
+        {/* Tác vụ nền gần đây — đọc trực tiếp từ các hàng đợi BullMQ (GET /system/jobs,
+            Admin-only): đồng bộ thời tiết, xuất báo cáo, nhập trạm hàng loạt. */}
         <div style={{ fontSize: 14, fontWeight: 700, margin: '22px 0 12px' }}>Tác vụ nền gần đây</div>
         <div style={{ background: '#fff', border: '1px solid #E8EAEE', borderRadius: 14, overflow: 'hidden' }}>
-          {JOBS.map((j) => (
-            <div key={j.name} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '13px 18px', borderBottom: '1px solid #F2F3F5' }}>
-              {j.state === 'running' ? (
-                <span style={{ width: 26, height: 26, borderRadius: '50%', border: '2.5px solid #FEE2E2', borderTopColor: '#EE0033', animation: 'fwsSpin 1s linear infinite', flex: 'none' }} />
-              ) : (
-                <span style={{ width: 26, height: 26, borderRadius: '50%', background: '#ECFDF3', display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none' }}>
-                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M5 12.5l4 4 10-10" stroke="#16A34A" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
-                </span>
-              )}
-              <div style={{ flex: 1 }}>
-                <div style={{ fontSize: 13.5, fontWeight: 600 }}>{j.name}</div>
-                <div style={{ fontSize: 11.5, color: '#9AA0A6', fontFamily: "'IBM Plex Mono',monospace" }}>{j.time} · {j.info}</div>
+          {(jobs ?? []).map((j) => {
+            const [badge, badgeColor, badgeBg] = JOB_TONE[j.state];
+            return (
+              <div key={`${j.queue}:${j.id}`} style={{ display: 'flex', alignItems: 'center', gap: 12, padding: '13px 18px', borderBottom: '1px solid #F2F3F5' }}>
+                {j.state === 'active' ? (
+                  <span style={{ width: 26, height: 26, borderRadius: '50%', border: '2.5px solid #FEE2E2', borderTopColor: '#EE0033', animation: 'fwsSpin 1s linear infinite', flex: 'none' }} />
+                ) : j.state === 'failed' ? (
+                  <span style={{ width: 26, height: 26, borderRadius: '50%', background: '#FDE7EB', display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none' }}>
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M7 7l10 10M17 7L7 17" stroke="#EE0033" strokeWidth="2.4" strokeLinecap="round" /></svg>
+                  </span>
+                ) : j.state === 'completed' ? (
+                  <span style={{ width: 26, height: 26, borderRadius: '50%', background: '#ECFDF3', display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none' }}>
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M5 12.5l4 4 10-10" stroke="#16A34A" strokeWidth="2.4" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                  </span>
+                ) : (
+                  <span style={{ width: 26, height: 26, borderRadius: '50%', background: '#F1F2F4', display: 'flex', alignItems: 'center', justifyContent: 'center', flex: 'none' }}>
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="8" stroke="#9AA0A6" strokeWidth="1.8" /><path d="M12 8v4l2.5 1.5" stroke="#9AA0A6" strokeWidth="1.8" strokeLinecap="round" /></svg>
+                  </span>
+                )}
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ fontSize: 13.5, fontWeight: 600 }}>{QUEUE_LABEL[j.queue]}</div>
+                  <div style={{ fontSize: 11.5, color: '#9AA0A6', fontFamily: "'IBM Plex Mono',monospace", whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{jobTime(j)} · {jobInfo(j)} · #{j.id.slice(0, 8)}</div>
+                </div>
+                <span style={{ fontSize: 12, fontWeight: 700, color: badgeColor, background: badgeBg, padding: '4px 10px', borderRadius: 7, flex: 'none' }}>{badge}</span>
               </div>
-              {j.state === 'running' ? (
-                <span style={{ fontSize: 12, fontWeight: 700, color: '#B45309', background: '#FEF3C7', padding: '4px 10px', borderRadius: 7 }}>Đang chạy</span>
-              ) : (
-                <span style={{ fontSize: 12, fontWeight: 700, color: '#16A34A', background: '#ECFDF3', padding: '4px 10px', borderRadius: 7 }}>Hoàn tất</span>
-              )}
-            </div>
-          ))}
+            );
+          })}
+          {jobs == null && (
+            <div style={{ textAlign: 'center', color: '#9AA0A6', fontSize: 13, padding: '24px 0' }}>Không tải được danh sách tác vụ nền.</div>
+          )}
+          {jobs?.length === 0 && (
+            <div style={{ textAlign: 'center', color: '#9AA0A6', fontSize: 13, padding: '24px 0' }}>Chưa có tác vụ nền nào gần đây.</div>
+          )}
         </div>
         <div style={{ height: 24 }} />
       </div>

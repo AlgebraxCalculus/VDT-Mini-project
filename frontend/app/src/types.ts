@@ -123,28 +123,6 @@ export interface AlertHistoryEntry {
   createdAt: string;
 }
 
-export interface ForecastDay {
-  day: string;
-  val: number;
-  color: string;
-  h: string;
-}
-
-export type EventState = 'draft' | 'active' | 'monitor' | 'closed';
-
-export interface EventItem {
-  id: string;
-  name: string;
-  type: string;
-  sev: string;
-  sevColor: string;
-  state: EventState;
-  start: string;
-  end: string;
-  provinces: string[];
-  stations: number;
-}
-
 export interface Account {
   name: string;
   user: string;
@@ -152,43 +130,6 @@ export interface Account {
   roleColor: string;
   status: 'active' | 'locked';
   last: string;
-}
-
-export type ServiceHealth = 'ok' | 'slow' | 'err';
-
-export interface ServiceStatus {
-  name: string;
-  desc: string;
-  status: ServiceHealth;
-  latency: string;
-  uptime: string;
-  last: string;
-}
-
-export interface BgJob {
-  name: string;
-  state: 'done' | 'running';
-  time: string;
-  info: string;
-}
-
-export interface ImportRow {
-  row: number;
-  id: string;
-  name: string;
-  prov: string;
-  lat: string;
-  lng: string;
-  ok: boolean;
-  msg: string;
-}
-
-export interface Notif {
-  title: string;
-  body: string;
-  time: string;
-  color: string;
-  bg: string;
 }
 
 export interface StationDrawerForm {

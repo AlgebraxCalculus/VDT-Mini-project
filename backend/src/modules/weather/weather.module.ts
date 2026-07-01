@@ -121,8 +121,10 @@ import { GlofasService } from './glofas.service';
       ],
     },
   ],
-  // GdacsProvider is reused by the events module's disaster-ingestion pipeline
-  // (Group D), so it must be exported.
-  exports: [GdacsProvider],
+  // The ordered disaster fallback chain (GDACS → ReliefWeb → EONET) is reused by
+  // the events module's auto-ingestion pipeline (Group D), which reorders it to its
+  // own priority; export the token so it can inject it. GdacsProvider stays exported
+  // for backward compatibility.
+  exports: [GdacsProvider, DISASTER_PROVIDERS],
 })
 export class WeatherModule {}

@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
 import { StationRiskAssessment } from './entities/station-risk-assessment.entity';
@@ -16,11 +17,12 @@ import { RISK_HORIZON_DAYS } from './risk.constants';
 import {
   assessRisk,
   elevationIndex,
-  normalizeWeights,
   rainIndex,
   riverIndex,
-  DEFAULT_RISK_WEIGHTS,
+  deriveWeightProfiles,
+  weightsForStation,
   RiskVerdict,
+  RiskWeightProfiles,
   ThresholdTier,
 } from './risk-formula';
 
@@ -57,7 +59,10 @@ export interface ClassifiedForecastPoint extends ForecastPoint {
  */
 @Injectable()
 export class RiskService {
-  private readonly weights = normalizeWeights(DEFAULT_RISK_WEIGHTS);
+  // Per-group hazard weights, resolved from the same env vars as the write-side
+  // Risk Engine so API 38's on-the-fly classification matches the pre-computed
+  // table. The group (river-monitored vs rain-only) is picked per station below.
+  private readonly weightProfiles: RiskWeightProfiles;
 
   constructor(
     @InjectRepository(StationRiskAssessment)
@@ -69,7 +74,12 @@ export class RiskService {
     @InjectRepository(Province)
     private readonly provincesRepo: Repository<Province>,
     private readonly dataSource: DataSource,
-  ) {}
+    private readonly config: ConfigService,
+  ) {
+    this.weightProfiles = deriveWeightProfiles(
+      parseFloat(this.config.get<string>('RISK_AHP_RIVER_VS_RAIN') ?? ''),
+    ).profiles;
+  }
 
   // ---------------------------------------------------------------------------
   // API 36 — GET /risk/stations
@@ -223,6 +233,7 @@ export class RiskService {
     );
 
     const tiers = await this.loadStationTiers(stationId);
+    const weights = weightsForStation(tiers, this.weightProfiles);
     const pct = await this.provinceElevationPercentiles(station.provinceId);
     const E = elevationIndex(station.elevation, pct?.p10 ?? null, pct?.p90 ?? null);
 
@@ -240,7 +251,7 @@ export class RiskService {
           riverLevel: d.riverWaterLevel,
         },
         tiers,
-        this.weights,
+        weights,
       );
       return {
         ...d,

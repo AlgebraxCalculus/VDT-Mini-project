@@ -16,9 +16,11 @@ import { StationsModule } from './modules/stations/stations.module';
 import { EventsModule } from './modules/events/events.module';
 import { ProvincesModule } from './modules/provinces/provinces.module';
 import { RealtimeModule } from './modules/realtime/realtime.module';
+import { MapModule } from './modules/map/map.module';
 import { WeatherModule } from './modules/weather/weather.module';
 import { RiskModule } from './modules/risk/risk.module';
 import { ReportsModule } from './modules/reports/reports.module';
+import { SystemModule } from './modules/system/system.module';
 
 @Module({
   imports: [
@@ -49,9 +51,11 @@ import { ReportsModule } from './modules/reports/reports.module';
     EventsModule,
     ProvincesModule,
     RealtimeModule,
+    MapModule,
     WeatherModule,
     RiskModule,
     ReportsModule,
+    SystemModule,
   ],
   controllers: [AppController],
   providers: [

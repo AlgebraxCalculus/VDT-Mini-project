@@ -16,6 +16,7 @@ import { FloodThreshold } from './entities/flood-threshold.entity';
 import { Station } from './entities/station.entity';
 import { EventBusService } from '../../event-bus/event-bus.service';
 import { EVENT_CHANNELS } from '../../event-bus/event-bus.constants';
+import { ProvinceResolverService } from '../provinces/province-resolver.service';
 
 /** Station detail returned to clients: the row + province + threshold tiers. */
 export type StationWithThresholds = Station & { thresholds: FloodThreshold[] };
@@ -39,6 +40,9 @@ export class StationsService {
     // Used for transactions + the raw PostGIS statements (ST_MakePoint/ST_Contains).
     private readonly dataSource: DataSource,
     private readonly eventBus: EventBusService,
+    // Falls back to reverse-geocoding (and auto-creating a province) when a
+    // coordinate lands outside every existing province boundary.
+    private readonly provinceResolver: ProvinceResolverService,
   ) {}
 
   // ----------------------------------------------------------------------------
@@ -87,6 +91,11 @@ export class StationsService {
       }
       return id;
     });
+
+    // applyGeometry assigns province via ST_Contains; if the point is outside
+    // every existing province, geocode it and auto-create one (kept out of the
+    // transaction above so the network call doesn't hold a DB lock).
+    await this.ensureProvince(stationId, dto.longitude, dto.latitude);
 
     // Seeding thresholds feeds the risk inputs → notify the Risk Engine.
     if (dto.thresholds?.length) this.emitThresholdChanged(stationId);
@@ -279,6 +288,11 @@ export class StationsService {
       }
     });
 
+    // Re-resolve the province (geocode + auto-create on miss) when coords moved.
+    if (latProvided && lngProvided) {
+      await this.ensureProvince(id, dto.longitude!, dto.latitude!);
+    }
+
     return this.findOne(id);
   }
 
@@ -361,6 +375,35 @@ export class StationsService {
         WHERE id = $3`,
       [longitude, latitude, stationId],
     );
+  }
+
+  /**
+   * Ensure the station has a province. applyGeometry already tried the spatial
+   * fast-path (ST_Contains over existing boundaries); only when that left
+   * province_id NULL do we pay for a reverse-geocode that resolves — and if
+   * needed creates — the province. Runs outside any transaction.
+   */
+  private async ensureProvince(
+    stationId: number,
+    longitude: number,
+    latitude: number,
+  ): Promise<void> {
+    const rows = await this.dataSource.query<{ province_id: number | null }[]>(
+      `SELECT province_id FROM stations WHERE id = $1`,
+      [stationId],
+    );
+    if (rows[0]?.province_id != null) return;
+
+    const provinceId = await this.provinceResolver.resolveProvinceId(
+      latitude,
+      longitude,
+    );
+    if (provinceId != null) {
+      await this.dataSource.query(
+        `UPDATE stations SET province_id = $1 WHERE id = $2`,
+        [provinceId, stationId],
+      );
+    }
   }
 
   /** station_code is UNIQUE across ALL rows, including soft-deleted ones. */

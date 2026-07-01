@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import type { CSSProperties } from 'react';
 import { useApp } from '../state/AppStateContext';
-import { riskMeta } from '../data/mockData';
+import { riskMeta } from '../lib/display';
 import {
   ApiError,
   apiAssignImpact,

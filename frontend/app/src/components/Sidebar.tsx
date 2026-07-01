@@ -1,7 +1,6 @@
-import { useEffect, useState } from 'react';
 import type { CSSProperties, ReactNode } from 'react';
 import { useApp } from '../state/AppStateContext';
-import { apiListEvents, apiListRiskStations, apiLogout } from '../lib/api';
+import { apiLogout } from '../lib/api';
 import { closeRiskSocket } from '../lib/realtime';
 import { isLocked, ROLE_COLOR, ROLE_USER_NAME } from '../lib/role';
 import type { RouteKey } from '../types';
@@ -10,7 +9,6 @@ interface NavItem {
   key: RouteKey;
   label: string;
   icon: ReactNode;
-  badge?: string;
 }
 
 const NAV_TOP: NavItem[] = [
@@ -103,30 +101,6 @@ export default function Sidebar() {
   const { state, patch } = useApp();
   const { sidebarOpen, role, route, currentUser } = state;
 
-  const [riskCount, setRiskCount] = useState<number | null>(null);
-  const [eventCount, setEventCount] = useState<number | null>(null);
-
-  // Live nav badges from real data: stations at risk *today* (API 36 with a
-  // single-day window ⇒ ~one row per station, LOW excluded) and ongoing events
-  // (API 20). setState only runs in async callbacks — never in the effect body.
-  useEffect(() => {
-    const today = new Date().toISOString().slice(0, 10);
-    apiListRiskStations({ from: today, to: today, size: 1 })
-      .then((res) => setRiskCount(res.total))
-      .catch(() => {});
-    apiListEvents({ status: 'ONGOING', size: 1 })
-      .then((res) => setEventCount(res.total))
-      .catch(() => {});
-  }, []);
-
-  const fmtBadge = (n: number | null): string | undefined =>
-    n == null || n <= 0 ? undefined : n > 99 ? '99+' : String(n);
-
-  const badges: Partial<Record<RouteKey, string | undefined>> = {
-    forecast: fmtBadge(riskCount),
-    events: fmtBadge(eventCount),
-  };
-
   // Revoke tokens server-side, then drop the session and return to login.
   const logout = () => {
     closeRiskSocket(); // drop the WS connection so the next user re-handshakes
@@ -170,16 +144,10 @@ export default function Sidebar() {
       )}
       {items.map((item) => {
         const locked = isLocked(role, item.key);
-        const badge = badges[item.key] ?? item.badge;
         return (
           <button key={item.key} onClick={() => goTo(item)} title={item.label} style={navBtn(item)}>
             <span style={{ flex: 'none', display: 'flex' }}>{item.icon}</span>
             {sidebarOpen && <span style={{ flex: 1, textAlign: 'left', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{item.label}</span>}
-            {sidebarOpen && badge && !locked && (
-              <span style={{ flex: 'none', minWidth: 19, height: 19, padding: '0 5px', borderRadius: 9, background: '#EE0033', color: '#fff', fontSize: 11, fontWeight: 700, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
-                {badge}
-              </span>
-            )}
             {locked && <span style={{ flex: 'none', display: 'flex', opacity: 0.6 }}>{lockIcon}</span>}
           </button>
         );

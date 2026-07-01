@@ -68,6 +68,25 @@ services:
     ports:
       - "${API_PORT:-3000}:3000"
 
+  # Frontend — React/Vite SPA built and served by nginx, which also reverse-proxies
+  # the REST API + /socket.io to the `api` container. The browser talks to this one
+  # origin only (same-origin → no CORS, no hardcoded API host). Open the app at
+  # http://localhost:${WEB_PORT:-8080}.
+  web:
+    build:
+      context: ../frontend/app
+      dockerfile: Dockerfile
+      args:
+        # Empty = same-origin; nginx proxies API/WebSocket calls to `api`.
+        VITE_API_BASE: ""
+    image: vdt-flood-web:latest
+    container_name: vdt-flood-web
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - "${WEB_PORT:-8080}:80"
+
 volumes:
   db_data:
   redis_data:

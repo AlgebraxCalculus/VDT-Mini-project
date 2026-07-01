@@ -590,6 +590,114 @@ export const apiAssignImpact = (eventId: string, body: AssignImpactPayload) =>
   request<EventScope>(`/events/${eventId}/impact`, { method: 'POST', body });
 
 // ---------------------------------------------------------------------------
+// Group E — Map / GIS by viewport BBOX (APIs 27–30). All read-only, Viewer+.
+//   • 27 GET /map/stations          — in-view stations + risk, clustered zoomed-out
+//   • 28 GET /map/events            — active events + affected polygon in viewport
+//   • 29 GET /map/weather           — forecast field overlay (rain/wind/temp) points
+//   • 30 GET /map/stations/search   — free-text + risk filter within the viewport
+// Shapes mirror map.service.ts. /map/stations returns enriched, Station-compatible
+// rows so the existing map rendering consumes them directly.
+// ---------------------------------------------------------------------------
+
+/** One grid-cell cluster (API 27, zoomed-out mode). */
+export interface MapCluster {
+  lng: number;
+  lat: number;
+  count: number;
+  riskStatus: RiskStatus;
+}
+
+/** API 27 response — either individual enriched stations or clusters. */
+export type MapStationsResult =
+  | { clustered: false; zoom: number; stations: Station[] }
+  | { clustered: true; zoom: number; clusters: MapCluster[] };
+
+/** Drawable active event with its affected-area footprint as GeoJSON (API 28). */
+export interface MapEvent {
+  id: string;
+  eventCode: string;
+  name: string;
+  status: EventStatus;
+  disasterTypeCode: string | null;
+  startTime: string;
+  provinceCount: number;
+  stationCount: number;
+  affectedArea: GeoJsonPolygon | null;
+}
+
+export type WeatherOverlayLayer = 'rain' | 'wind' | 'temp';
+
+/** One weather-overlay sample (API 29). `value` unit depends on the layer. */
+export interface WeatherOverlayPoint {
+  lat: number;
+  lng: number;
+  value: number;
+}
+
+export interface WeatherOverlayResult {
+  layer: WeatherOverlayLayer;
+  snapshotId: string | null;
+  points: WeatherOverlayPoint[];
+}
+
+function bboxParams(b: ViewportBounds): URLSearchParams {
+  const qs = new URLSearchParams();
+  qs.set('minLng', String(b.minLng));
+  qs.set('minLat', String(b.minLat));
+  qs.set('maxLng', String(b.maxLng));
+  qs.set('maxLat', String(b.maxLat));
+  return qs;
+}
+
+/**
+ * API 27 — GET /map/stations. Stations inside the BBOX enriched with risk score/
+ * severity + a light forecast snapshot; the server clusters into grid cells when
+ * `zoom` is below its threshold ("gộp marker khi zoom-out"). Pass the live map zoom.
+ */
+export function apiGetMapStations(
+  bounds: ViewportBounds,
+  params: { zoom?: number; riskStatus?: RiskStatus; limit?: number } = {},
+): Promise<MapStationsResult> {
+  const qs = bboxParams(bounds);
+  if (params.zoom != null) qs.set('zoom', String(params.zoom));
+  if (params.riskStatus) qs.set('riskStatus', params.riskStatus);
+  if (params.limit != null) qs.set('limit', String(params.limit));
+  return request<MapStationsResult>(`/map/stations?${qs.toString()}`);
+}
+
+/** API 28 — GET /map/events. Defaults to ONGOING events intersecting the viewport. */
+export function apiGetMapEvents(
+  bounds: ViewportBounds,
+  params: { status?: EventStatus } = {},
+): Promise<MapEvent[]> {
+  const qs = bboxParams(bounds);
+  if (params.status) qs.set('status', params.status);
+  return request<MapEvent[]>(`/map/events?${qs.toString()}`);
+}
+
+/** API 29 — GET /map/weather. Forecast field overlay points for the chosen layer. */
+export function apiGetMapWeather(
+  bounds: ViewportBounds,
+  layer: WeatherOverlayLayer,
+): Promise<WeatherOverlayResult> {
+  const qs = bboxParams(bounds);
+  qs.set('layer', layer);
+  return request<WeatherOverlayResult>(`/map/weather?${qs.toString()}`);
+}
+
+/** API 30 — GET /map/stations/search. Free-text + risk filter within the viewport. */
+export function apiSearchMapStations(
+  bounds: ViewportBounds,
+  params: { q?: string; riskStatus?: RiskStatus; limit?: number } = {},
+): Promise<Station[]> {
+  const qs = bboxParams(bounds);
+  if (params.q) qs.set('q', params.q);
+  if (params.riskStatus) qs.set('riskStatus', params.riskStatus);
+  if (params.limit != null) qs.set('limit', String(params.limit));
+  return request<Station[]>(`/map/stations/search?${qs.toString()}`);
+}
+
+// ---------------------------------------------------------------------------
 // Group F — third-party weather integration.
 //   • Healthcheck (API 35) is Admin-only on the server.
 //   • Manual refresh + job status (APIs 31–32) are Operator/Admin.
@@ -610,6 +718,32 @@ export interface SourceHealth {
 /** API 35 — GET /integrations/health. One row per external source (Admin-only). */
 export const apiGetIntegrationsHealth = () =>
   request<SourceHealth[]>('/integrations/health');
+
+/**
+ * POST /integrations/health/refresh (Admin-only) — probe every source now and
+ * return the fresh results. Slower than the GET (it actually pings each source),
+ * but reflects config changes immediately instead of waiting for the cron.
+ */
+export const apiRefreshIntegrationsHealth = () =>
+  request<SourceHealth[]>('/integrations/health/refresh', { method: 'POST' });
+
+/** One recent background job — mirrors backend RecentJob (system.types.ts). */
+export interface RecentJob {
+  id: string;
+  queue: 'weather' | 'reports' | 'stations-import';
+  name: string;
+  state: 'active' | 'completed' | 'failed' | 'waiting' | 'delayed' | 'paused' | 'unknown';
+  /** Numeric progress 0–100. */
+  progress: number;
+  attemptsMade: number;
+  createdAt: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  failedReason: string | null;
+}
+
+/** GET /system/jobs — recent BullMQ jobs across all queues, newest first (Admin-only). */
+export const apiGetRecentJobs = () => request<RecentJob[]>('/system/jobs');
 
 export interface RefreshWeatherPayload {
   stationIds?: number[];
