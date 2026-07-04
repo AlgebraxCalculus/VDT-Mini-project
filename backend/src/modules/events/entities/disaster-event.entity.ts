@@ -8,7 +8,6 @@ import {
   UpdateDateColumn,
 } from 'typeorm';
 import { DisasterType } from './disaster-type.entity';
-import { User } from '../../users/entities/user.entity';
 
 /** Event lifecycle state machine. CLOSED is terminal — locks all edits. */
 export enum EventStatus {
@@ -49,13 +48,6 @@ export class DisasterEvent {
 
   @Column({ type: 'text', nullable: true })
   description: string | null;
-
-  @Column({ name: 'created_by', type: 'int', nullable: true })
-  createdBy: number | null;
-
-  @ManyToOne(() => User)
-  @JoinColumn({ name: 'created_by' })
-  creator: User | null;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;

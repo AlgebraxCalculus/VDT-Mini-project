@@ -1,6 +1,6 @@
 # Backend — Hệ thống Cảnh báo Ngập lụt (Flood Warning System)
 
-Dịch vụ API cho hệ thống cảnh báo ngập lụt viễn thông: theo dõi hơn 10.000 nhà trạm, giám sát bão/lũ theo thời gian thực và tính sẵn nguy cơ ngập 5–7 ngày cho từng trạm. Toàn bộ phép toán không gian (spatial) chạy trong PostGIS; cảnh báo rủi ro được đẩy tới client qua WebSocket.
+Dịch vụ API cho hệ thống cảnh báo ngập lụt viễn thông: theo dõi hơn 10.000 nhà trạm, giám sát bão/lũ theo thời gian thực và tính sẵn nguy cơ ngập 5 ngày cho từng trạm. Toàn bộ phép toán không gian (spatial) chạy trong PostGIS; cảnh báo rủi ro được đẩy tới client qua WebSocket.
 
 ---
 

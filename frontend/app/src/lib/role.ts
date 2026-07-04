@@ -62,7 +62,7 @@ export function isLocked(role: Role, route: RouteKey): boolean {
 export const PAGE_TITLES: Record<RouteKey, [string, string]> = {
   login: ['', ''],
   map: ['Bản đồ trực tuyến', 'Giám sát thời gian thực · cập nhật qua WebSocket'],
-  forecast: ['Dự báo nguy cơ ngập', 'Danh sách trạm rủi ro 5–7 ngày tới'],
+  forecast: ['Dự báo nguy cơ ngập', 'Danh sách trạm rủi ro 5 ngày tới'],
   stations: ['Quản lý nhà trạm', 'Tạo, sửa, xóa và tra cứu nhà trạm'],
   import: ['Nhập trạm hàng loạt', 'Tải lên & xử lý bất đồng bộ theo lô'],
   events: ['Sự kiện thiên tai', 'Quản lý sự kiện & phạm vi ảnh hưởng'],

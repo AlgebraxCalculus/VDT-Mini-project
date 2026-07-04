@@ -36,8 +36,10 @@ const WEATHER_OVERLAY_STYLE: Record<WeatherLayerKey, { color: string; max: numbe
   wind: { color: '#EC4899', max: 20 },
 };
 
+// Forecast horizon shown in the detail panel + scrubber; series are capped to this.
+const FORECAST_DAYS = 5;
 // Placeholder scrubber bar heights before a station's real series loads.
-const SCRUB_HEIGHTS = [26, 30, 38, 34, 28, 22, 18];
+const SCRUB_HEIGHTS = [26, 30, 38, 34, 28];
 
 // alert_level → colour (1 Chú ý, 2 Cảnh báo, 3 Nguy hiểm).
 const ALERT_LEVEL_COLOR: Record<number, string> = { 1: '#EAB308', 2: '#F97316', 3: '#EE0033' };
@@ -140,8 +142,9 @@ export default function MapView() {
     weatherGroupRef.current = weatherGroup;
     eventGroupRef.current = eventGroup;
 
-    // Shared canvas renderer, pinned to the stations pane so clicks win over overlays.
-    const stationRenderer = L.canvas({ padding: 0.5, pane: 'fws-stations' });
+    // Shared canvas renderer in the stations pane (clicks win over overlays). `tolerance`
+    // widens each dot's click area (radius 5 → ~11px) so near-misses still open the panel.
+    const stationRenderer = L.canvas({ padding: 0.5, tolerance: 6, pane: 'fws-stations' });
     stationRendererRef.current = stationRenderer;
     const stationLayer = L.layerGroup().addTo(map);
     stationLayerRef.current = stationLayer;
@@ -345,7 +348,7 @@ export default function MapView() {
     });
   }, [weatherLayer, weatherPoints]);
 
-  // Selected station's 7-day forecast (API 38) + alert history (API 39). Keyed by id
+  // Selected station's 5-day forecast (API 38) + alert history (API 39). Keyed by id
   // only so it doesn't refire on pan; errors clear the panel rather than break it.
   useEffect(() => {
     let alive = true;
@@ -357,9 +360,9 @@ export default function MapView() {
       });
       return () => { alive = false; };
     }
-    // Feeds the panel's 7-day risk bars; the scrubber's day count comes from the province series.
+    // Feeds the panel's 5-day risk bars; the scrubber's day count comes from the province series.
     apiGetStationForecast(selectedId)
-      .then((f) => { if (alive) setSelForecast(f.series); })
+      .then((f) => { if (alive) setSelForecast(f.series.slice(0, FORECAST_DAYS)); })
       .catch(() => { if (alive) setSelForecast([]); });
     apiGetStationAlertHistory(selectedId)
       .then((h) => { if (alive) setSelHistory(h.data); })
@@ -367,11 +370,9 @@ export default function MapView() {
     return () => { alive = false; };
   }, [selectedId]);
 
-  // Locate a station selected from outside the map (e.g. ForecastView): fetch its
-  // detail (API 13) as the panel fallback and fly past the cluster zoom so the
-  // viewport refetch loads the enriched marker. Keyed by `selectedId` only and gated
-  // on flownToRef (not a cleanup flag) so depending on `stations` can't cancel the
-  // in-flight fetch mid-select. Runs once per selection.
+  // Station selected from another view (not yet in viewport): fetch its detail (API 13) as
+  // the panel fallback and fly past the cluster zoom. flownToRef guards a single fetch per
+  // selection so a `stations` change can't cancel it mid-flight.
   useEffect(() => {
     if (selectedId == null) {
       flownToRef.current = null;
@@ -401,27 +402,28 @@ export default function MapView() {
   const selStation = stations.find((s) => s.id === selectedId) ?? (selDetail?.id === selectedId ? selDetail : null);
   const selProvinceId = selStation?.provinceId ?? null;
   // Province aggregate (API 37) — the scrubber's series; also syncs the play timer's
-  // day count (5–7) and restarts at today. Keyed by province id so it doesn't refire on pan.
+  // day count (5) and restarts at today. Keyed by province id so it doesn't refire on pan.
   useEffect(() => {
     let alive = true;
     if (selProvinceId == null) {
       Promise.resolve().then(() => {
         if (!alive) return;
         setProvForecast([]);
-        patch({ scrubDayCount: 7, scrubDay: 0 }); // static placeholder scrubber
+        patch({ scrubDayCount: FORECAST_DAYS, scrubDay: 0 }); // static placeholder scrubber
       });
       return () => { alive = false; };
     }
     apiGetProvinceForecast(selProvinceId)
       .then((p) => {
         if (!alive) return;
-        setProvForecast(p.series);
-        patch({ scrubDayCount: p.series.length || 7, scrubDay: 0 });
+        const series = p.series.slice(0, FORECAST_DAYS);
+        setProvForecast(series);
+        patch({ scrubDayCount: series.length || FORECAST_DAYS, scrubDay: 0 });
       })
       .catch(() => {
         if (!alive) return;
         setProvForecast([]);
-        patch({ scrubDayCount: 7 });
+        patch({ scrubDayCount: FORECAST_DAYS });
       });
     return () => { alive = false; };
   }, [selProvinceId, patch]);
@@ -655,7 +657,7 @@ export default function MapView() {
               </div>
             </div>
 
-            <div style={{ fontSize: 12, fontWeight: 700, color: '#6B7280', letterSpacing: 0.4, textTransform: 'uppercase', margin: '18px 0 9px' }}>Dự báo chỉ số ngập 7 ngày</div>
+            <div style={{ fontSize: 12, fontWeight: 700, color: '#6B7280', letterSpacing: 0.4, textTransform: 'uppercase', margin: '18px 0 9px' }}>Dự báo chỉ số ngập 5 ngày</div>
             <div style={{ display: 'flex', alignItems: 'flex-end', gap: 6, height: 78 }}>
               {selForecast.map((f, i) => (
                 <button

@@ -2,7 +2,7 @@
   "name": "vdt-flood-warning-backend",
   "version": "0.1.0",
   "description": "Flood-risk warning system backend (NestJS + TypeORM + PostGIS)",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "scripts": {
     "build": "nest build",
     "start": "nest start",

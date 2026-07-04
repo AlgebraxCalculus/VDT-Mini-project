@@ -206,8 +206,8 @@ export class EventIngestionService {
         { id: string; status: string; is_new: boolean }[]
       >(
         `INSERT INTO disaster_events
-           (event_code, disaster_type_id, name, status, start_time, description, created_by)
-         VALUES ($1, $2, $3, 'ONGOING', $4, $5, NULL)
+           (event_code, disaster_type_id, name, status, start_time, description)
+         VALUES ($1, $2, $3, 'ONGOING', $4, $5)
          ON CONFLICT (event_code)
            DO UPDATE SET name = EXCLUDED.name, updated_at = now()
          RETURNING id, status, (xmax = 0) AS is_new`,

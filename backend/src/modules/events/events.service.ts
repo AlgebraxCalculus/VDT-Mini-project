@@ -8,7 +8,6 @@ import {
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { DataSource, Repository } from 'typeorm';
-import { CreateEventDto } from './dto/create-event.dto';
 import { UpdateEventDto } from './dto/update-event.dto';
 import { CloseEventDto } from './dto/close-event.dto';
 import { QueryEventsDto } from './dto/query-events.dto';
@@ -18,7 +17,6 @@ import {
   DisasterEvent,
   EventStatus,
 } from './entities/disaster-event.entity';
-import { DisasterType } from './entities/disaster-type.entity';
 import { EventBusService } from '../../event-bus/event-bus.service';
 import { EVENT_CHANNELS } from '../../event-bus/event-bus.constants';
 
@@ -71,65 +69,9 @@ export class EventsService {
   constructor(
     @InjectRepository(DisasterEvent)
     private readonly eventsRepo: Repository<DisasterEvent>,
-    @InjectRepository(DisasterType)
-    private readonly typesRepo: Repository<DisasterType>,
     private readonly dataSource: DataSource,
     private readonly eventBus: EventBusService,
   ) {}
-
-  // --- API 22 — POST /events ---
-
-  /**
-   * Create an ONGOING event. Duplicate guard: one ONGOING event per disaster_type
-   * (scope isn't assigned until API 25, so the "same scope" rule can't apply yet).
-   */
-  async create(dto: CreateEventDto, userId: number): Promise<EventWithScope> {
-    const type = await this.typesRepo.findOne({
-      where: { id: dto.disasterTypeId },
-    });
-    if (!type) {
-      throw new BadRequestException(
-        `Disaster type ${dto.disasterTypeId} does not exist`,
-      );
-    }
-
-    const activeDuplicate = await this.eventsRepo.findOne({
-      where: {
-        disasterTypeId: dto.disasterTypeId,
-        status: EventStatus.ONGOING,
-      },
-    });
-    if (activeDuplicate) {
-      throw new ConflictException(
-        `An ONGOING ${type.code} event already exists (${activeDuplicate.eventCode})`,
-      );
-    }
-
-    const event = this.eventsRepo.create({
-      eventCode: this.buildEventCode(type.code),
-      disasterTypeId: dto.disasterTypeId,
-      name: dto.name,
-      status: EventStatus.ONGOING,
-      startTime: dto.startTime ? new Date(dto.startTime) : new Date(),
-      description: dto.description ?? null,
-      createdBy: userId,
-    });
-
-    let saved: DisasterEvent;
-    try {
-      saved = await this.eventsRepo.save(event);
-    } catch (err) {
-      // Rare event_code collision — regenerate once.
-      if ((err as { code?: string }).code === '23505') {
-        event.eventCode = this.buildEventCode(type.code);
-        saved = await this.eventsRepo.save(event);
-      } else {
-        throw err;
-      }
-    }
-
-    return this.findOne(saved.id);
-  }
 
   // --- API 20 / 21 — read ---
 
@@ -425,13 +367,6 @@ export class EventsService {
       provinceCount: c.provinces,
       stationCount: c.stations,
     });
-  }
-
-  /** Human-readable, collision-resistant code, e.g. STORM-20260622-3F9A. */
-  private buildEventCode(typeCode: string): string {
-    const ymd = new Date().toISOString().slice(0, 10).replace(/-/g, '');
-    const rand = Math.random().toString(36).slice(2, 6).toUpperCase();
-    return `${typeCode}-${ymd}-${rand}`;
   }
 
   /** Publish EVENT_CLOSED so map/risk layers refresh. Fire-and-forget post-commit. */

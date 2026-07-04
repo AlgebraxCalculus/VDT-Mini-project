@@ -1,11 +1,16 @@
 import { useEffect, useState } from 'react';
 import { useApp } from '../state/AppStateContext';
 import { riskMeta, floodLevel } from '../lib/display';
-import { ApiError, apiListEvents, apiListRiskStations, apiListStations } from '../lib/api';
+import { ApiError, apiGetStationForecast, apiListEvents, apiListRiskStations, apiListStations } from '../lib/api';
 import { exportReport } from '../lib/report';
-import type { RiskAssessment } from '../types';
+import type { ClassifiedForecastPoint, RiskAssessment } from '../types';
 
-/** One table row: a station with its 7-day risk sparkline + peak. */
+// Top at-risk stations shown; each gets a full day-series fetched for its sparkline.
+const TOP_N = 24;
+// Forecast horizon rendered in the trend sparkline.
+const FORECAST_DAYS = 5;
+
+/** A station row with its full-window risk sparkline + peak. */
 interface FcRow {
   id: number;
   stationCode: string;
@@ -29,46 +34,33 @@ function weekday(dateStr: string): string {
   return Number.isNaN(d.getTime()) ? dateStr.slice(5) : VN_WEEKDAYS[d.getDay()];
 }
 
-/**
- * Group API 36 rows (station × day) into one row per station: per-day scores become
- * the sparkline, today = first day, peak = highest-scoring day. Colour from risk_status.
- */
-function buildApiRows(data: RiskAssessment[]): FcRow[] {
-  const byStation = new Map<number, RiskAssessment[]>();
-  for (const a of data) {
-    const arr = byStation.get(a.stationId);
-    if (arr) arr.push(a);
-    else byStation.set(a.stationId, [a]);
-  }
-  const rows: FcRow[] = [];
-  byStation.forEach((arr) => {
-    arr.sort((x, y) => x.forecastDate.localeCompare(y.forecastDate));
-    const station = arr[0].station;
-    const scores = arr.map((a) => a.riskScore ?? 0);
-    const today = scores[0] ?? 0;
-    let peakVal = today;
-    let pi = 0;
-    scores.forEach((v, i) => {
-      if (v > peakVal) {
-        peakVal = v;
-        pi = i;
-      }
-    });
-    const meta = riskMeta(station?.riskStatus ?? null);
-    rows.push({
-      id: arr[0].stationId,
-      stationCode: station?.stationCode ?? `#${arr[0].stationId}`,
-      name: station?.name ?? '—',
-      provinceName: station?.province?.name ?? '—',
-      score: Math.round(today),
-      spark: scores.map((v) => sparkBar(v)),
-      peakDay: weekday(arr[pi].forecastDate),
-      peakVal: Math.round(peakVal),
-      riskColor: meta.color,
-      riskLabel: meta.label,
-    });
+// API 36 pages per station×day (partial days per station); API 38 supplies the full
+// series the sparkline needs. Ranking record carries the meta, series carries the bars.
+function buildRow(a: RiskAssessment, series: ClassifiedForecastPoint[]): FcRow {
+  const station = a.station;
+  const scores = series.length ? series.map((p) => p.riskScore ?? 0) : [Math.round(a.riskScore ?? 0)];
+  const dates = series.length ? series.map((p) => p.date) : [a.forecastDate];
+  let peakVal = scores[0] ?? 0;
+  let pi = 0;
+  scores.forEach((v, i) => {
+    if (v > peakVal) {
+      peakVal = v;
+      pi = i;
+    }
   });
-  return rows.sort((a, b) => b.peakVal - a.peakVal);
+  const meta = riskMeta(station?.riskStatus ?? null);
+  return {
+    id: a.stationId,
+    stationCode: station?.stationCode ?? `#${a.stationId}`,
+    name: station?.name ?? '—',
+    provinceName: station?.province?.name ?? '—',
+    score: Math.round(scores[0] ?? 0),
+    spark: scores.map((v) => sparkBar(v)),
+    peakDay: weekday(dates[pi]),
+    peakVal: Math.round(peakVal),
+    riskColor: meta.color,
+    riskLabel: meta.label,
+  };
 }
 
 export default function ForecastView() {
@@ -77,6 +69,8 @@ export default function ForecastView() {
   const [rows, setRows] = useState<FcRow[]>([]);
   const [loaded, setLoaded] = useState(false);
   const [total, setTotal] = useState<number>(0);
+  const [fcHigh, setFcHigh] = useState<number>(0);
+  const [fcVeryHigh, setFcVeryHigh] = useState<number>(0);
   const [activeEvents, setActiveEvents] = useState<number>(0);
   const [exporting, setExporting] = useState(false);
 
@@ -85,9 +79,21 @@ export default function ForecastView() {
   useEffect(() => {
     let cancelled = false;
     apiListRiskStations({ size: 100, sort: 'severity', includeLow: true })
-      .then((res) => {
+      .then(async (res) => {
+        // Severity sort → each station's first row is its worst day; dedupe to rank by peak.
+        const rankByStation = new Map<number, RiskAssessment>();
+        for (const a of res.data) if (!rankByStation.has(a.stationId)) rankByStation.set(a.stationId, a);
+        const ranked = [...rankByStation.values()];
+        if (!cancelled) {
+          setFcHigh(ranked.filter((a) => (a.riskScore ?? 0) >= 50).length);
+          setFcVeryHigh(ranked.filter((a) => (a.riskScore ?? 0) >= 70).length);
+        }
+        const top = ranked.slice(0, TOP_N);
+        const seriesList = await Promise.all(
+          top.map((a) => apiGetStationForecast(a.stationId).then((f) => f.series.slice(0, FORECAST_DAYS)).catch(() => [])),
+        );
         if (cancelled) return;
-        setRows(buildApiRows(res.data));
+        setRows(top.map((a, i) => buildRow(a, seriesList[i])).sort((x, y) => y.peakVal - x.peakVal));
         setLoaded(true);
       })
       .catch(() => {
@@ -97,17 +103,13 @@ export default function ForecastView() {
       .then((res) => {
         if (!cancelled) setTotal(res.total);
       })
-      .catch(() => {
-        /* leave total at 0 on failure */
-      });
-    // API 20 — ongoing-event count KPI; only the total is needed.
+      .catch(() => {});
+    // API 20 — ongoing-event count for the KPI.
     apiListEvents({ status: 'ONGOING', size: 1 })
       .then((res) => {
         if (!cancelled) setActiveEvents(res.total);
       })
-      .catch(() => {
-        /* leave active-event count at 0 on failure */
-      });
+      .catch(() => {});
     return () => {
       cancelled = true;
     };
@@ -133,8 +135,6 @@ export default function ForecastView() {
     }
   };
 
-  const fcHigh = rows.filter((r) => r.peakVal >= 50).length;
-  const fcVeryHigh = rows.filter((r) => r.peakVal >= 70).length;
   const liveData = loaded && rows.length > 0;
 
   return (
@@ -149,7 +149,7 @@ export default function ForecastView() {
           <div style={{ background: '#fff', border: '1px solid #E8EAEE', borderRadius: 14, padding: '16px 18px', borderLeft: '3px solid #F97316' }}>
             <div style={{ fontSize: 12, color: '#9AA0A6', fontWeight: 600 }}>Nguy cơ Cao</div>
             <div style={{ fontSize: 28, fontWeight: 800, fontFamily: "'IBM Plex Mono',monospace", marginTop: 4, color: '#F97316' }}>{fcHigh}</div>
-            <div style={{ fontSize: 11.5, color: '#9AA0A6', marginTop: 2 }}>Chỉ số ≥ 50 trong 5–7 ngày</div>
+            <div style={{ fontSize: 11.5, color: '#9AA0A6', marginTop: 2 }}>Chỉ số ≥ 50 trong 5 ngày</div>
           </div>
           <div style={{ background: '#fff', border: '1px solid #E8EAEE', borderRadius: 14, padding: '16px 18px', borderLeft: '3px solid #EE0033' }}>
             <div style={{ fontSize: 12, color: '#9AA0A6', fontWeight: 600 }}>Nguy cơ Rất cao</div>
@@ -195,7 +195,7 @@ export default function ForecastView() {
 
         <div style={{ background: '#fff', border: '1px solid #E8EAEE', borderRadius: 14, overflow: 'hidden' }}>
           <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr 150px 80px 160px 96px 96px', gap: 12, padding: '12px 18px', background: '#FAFBFC', borderBottom: '1px solid #EEF0F3', fontSize: 11.5, fontWeight: 700, color: '#8A9099', letterSpacing: 0.3, textTransform: 'uppercase' }}>
-            <span>Mã trạm</span><span>Tên trạm</span><span>Tỉnh / thành</span><span>Hôm nay</span><span>Xu hướng 7 ngày</span><span>Ngày đỉnh</span><span style={{ textAlign: 'right' }}>Mức</span>
+            <span>Mã trạm</span><span>Tên trạm</span><span>Tỉnh / thành</span><span>Hôm nay</span><span>Xu hướng 5 ngày</span><span>Ngày đỉnh</span><span style={{ textAlign: 'right' }}>Mức</span>
           </div>
           {rows.map((r) => (
             <button
@@ -220,7 +220,7 @@ export default function ForecastView() {
           ))}
           {rows.length === 0 && (
             <div style={{ textAlign: 'center', color: '#9AA0A6', fontSize: 13, padding: '28px 0' }}>
-              {loaded ? 'Chưa có trạm nguy cơ trong 5–7 ngày tới.' : 'Đang tải dữ liệu nguy cơ…'}
+              {loaded ? 'Chưa có trạm nguy cơ trong 5 ngày tới.' : 'Đang tải dữ liệu nguy cơ…'}
             </div>
           )}
         </div>
