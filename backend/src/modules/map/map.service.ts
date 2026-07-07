@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { RedisService } from '../../redis/redis.service';
 import { RiskStatus } from '../stations/entities/station.entity';
 import { GeoMultiPolygon, GeoPolygon } from '../../common/types/geometry.types';
 import { MapStationsDto } from './dto/map-stations.dto';
@@ -9,6 +10,10 @@ import { MapSearchDto } from './dto/map-search.dto';
 
 /** Below this zoom {@link MapService.getStations} clusters ("gộp marker khi zoom-out"). */
 const CLUSTER_ZOOM_THRESHOLD = 8;
+
+// Short TTL: the realtime WS push keeps clients fresh, so slight staleness is fine
+// while repeated bbox+zoom refetches from a panning map collapse to one query. 0 disables.
+const MAP_CACHE_TTL_S = parseInt(process.env.MAP_CACHE_TTL_S ?? '20', 10);
 
 /** Horizon (days) for the peak-risk lookup attached to map stations. */
 const RISK_WINDOW_DAYS = 7;
@@ -72,41 +77,43 @@ export interface WeatherOverlayResult {
   points: WeatherOverlayPoint[];
 }
 
-/**
- * Group E — Map / GIS by viewport BBOX (APIs 27–30). Read-only, spatial queries
- * filtered to the on-screen rectangle via the GIST index (ST_MakeEnvelope/ST_Contains).
- * All geometry is raw PostGIS through the injected DataSource, never the ORM.
- */
+/** Group E — Map/GIS viewport reads (APIs 27–30). Raw-PostGIS bbox queries, never the ORM. */
 @Injectable()
 export class MapService {
-  constructor(private readonly dataSource: DataSource) {}
+  constructor(
+    private readonly dataSource: DataSource,
+    private readonly redis: RedisService,
+  ) {}
 
   // --- API 27 — GET /map/stations (stations + risk, clustered when zoomed out) ---
 
   async getStations(dto: MapStationsDto): Promise<MapStationsResult> {
     const { minLng, minLat, maxLng, maxLat, zoom, riskStatus, limit } = dto;
+    const key = `map:stations:z${zoom}:${this.bboxKey(minLng, minLat, maxLng, maxLat)}:${riskStatus ?? '_'}:${limit}`;
 
-    if (zoom < CLUSTER_ZOOM_THRESHOLD) {
-      const clusters = await this.clusterStations(
+    return this.cached(key, MAP_CACHE_TTL_S, async () => {
+      if (zoom < CLUSTER_ZOOM_THRESHOLD) {
+        const clusters = await this.clusterStations(
+          minLng,
+          minLat,
+          maxLng,
+          maxLat,
+          zoom,
+          riskStatus,
+        );
+        return { clustered: true, zoom, clusters };
+      }
+
+      const stations = await this.queryStations({
         minLng,
         minLat,
         maxLng,
         maxLat,
-        zoom,
         riskStatus,
-      );
-      return { clustered: true, zoom, clusters };
-    }
-
-    const stations = await this.queryStations({
-      minLng,
-      minLat,
-      maxLng,
-      maxLat,
-      riskStatus,
-      limit,
+        limit,
+      });
+      return { clustered: false, zoom, stations };
     });
-    return { clustered: false, zoom, stations };
   }
 
   /**
@@ -283,6 +290,12 @@ export class MapService {
    */
   async getEvents(dto: MapEventsDto): Promise<MapEvent[]> {
     const { minLng, minLat, maxLng, maxLat, status } = dto;
+    const key = `map:events:${this.bboxKey(minLng, minLat, maxLng, maxLat)}:${status}`;
+    return this.cached(key, MAP_CACHE_TTL_S, () => this.fetchEvents(dto));
+  }
+
+  private async fetchEvents(dto: MapEventsDto): Promise<MapEvent[]> {
+    const { minLng, minLat, maxLng, maxLat, status } = dto;
     const rows = await this.dataSource.query<
       {
         id: string;
@@ -367,6 +380,14 @@ export class MapService {
 
   async getWeatherOverlay(dto: MapWeatherDto): Promise<WeatherOverlayResult> {
     const { minLng, minLat, maxLng, maxLat, layer } = dto;
+    const key = `map:weather:${layer}:${this.bboxKey(minLng, minLat, maxLng, maxLat)}`;
+    return this.cached(key, MAP_CACHE_TTL_S, () => this.fetchWeatherOverlay(dto));
+  }
+
+  private async fetchWeatherOverlay(
+    dto: MapWeatherDto,
+  ): Promise<WeatherOverlayResult> {
+    const { minLng, minLat, maxLng, maxLat, layer } = dto;
     const snapshotId = await this.latestForecastSnapshotId();
     if (!snapshotId) return { layer, snapshotId: null, points: [] };
 
@@ -424,6 +445,39 @@ export class MapService {
     end.setDate(end.getDate() + RISK_WINDOW_DAYS);
     const fmt = (d: Date) => d.toISOString().slice(0, 10);
     return { from: fmt(today), to: fmt(end) };
+  }
+
+  /** Best-effort read-through cache; a Redis blip falls through to the query. */
+  private async cached<T>(
+    key: string,
+    ttlSec: number,
+    produce: () => Promise<T>,
+  ): Promise<T> {
+    if (ttlSec <= 0) return produce();
+    try {
+      const hit = await this.redis.client.get(key);
+      if (hit) return JSON.parse(hit) as T;
+    } catch {
+      // fall through to the query
+    }
+    const value = await produce();
+    try {
+      await this.redis.client.set(key, JSON.stringify(value), 'EX', ttlSec);
+    } catch {
+      // best-effort
+    }
+    return value;
+  }
+
+  /** Rounds to ~110 m (3 dp) so tiny pans / float jitter reuse the same cache entry. */
+  private bboxKey(
+    minLng: number,
+    minLat: number,
+    maxLng: number,
+    maxLat: number,
+  ): string {
+    const r = (n: number) => n.toFixed(3);
+    return `${r(minLng)}:${r(minLat)}:${r(maxLng)}:${r(maxLat)}`;
   }
 }
 

@@ -40,6 +40,7 @@ Kiến trúc **module hóa theo domain** với tách lớp rõ ràng (gần vớ
 - **Xử lý bất đồng bộ (async workers):** các tác vụ nặng (đồng bộ thời tiết, import CSV, xuất báo cáo) chạy qua **BullMQ processor** trên các hàng đợi riêng (`weather`, `stations-import`, `reports`). API trả `202 { jobId }` ngay và client **poll** trạng thái. Worker chạy **in-process** trong container API — mở rộng bằng cách tăng số replica của container API (Risk Engine dùng Redis lock để chống tính trùng khi chạy nhiều instance).
 - **Event-driven backbone:** một event bus có kiểu (typed) trên nền Redis Pub/Sub. Các trigger phát `WEATHER_SNAPSHOT` / `THRESHOLD_CHANGED` / `EVENT_*`; **Risk Engine** là consumer, tính lại rủi ro rồi phát `RISK_DELTA` → gateway đẩy tới client. Mọi publish là fire-and-forget: lỗi bus không bao giờ làm hỏng mutation DB đã commit.
 - **Raw PostGIS qua `DataSource`:** hình học (geometry) không round-trip qua TypeORM entity save (tránh mất SRID). Đọc theo khung nhìn dùng `ST_MakeEnvelope` + GIST index.
+- **Cache đọc bản đồ:** các endpoint `/map/*` theo viewport được cache read-through qua Redis (TTL ngắn `MAP_CACHE_TTL_S`) để gộp truy vấn lặp khi pan/zoom; không invalidate chủ động vì WS push `risk:delta` giữ client tươi.
 - **Single-source TypeORM config:** `src/database/data-source.ts` dùng chung cho cả app và CLI; `synchronize` luôn `false` — mọi thay đổi schema đi qua migration SQL viết tay.
 
 ### Cấu trúc thư mục
@@ -91,6 +92,8 @@ cp .env.example .env
 | `DB_HOST` / `DB_PORT` | `localhost` / `5432` | Host DB (trong compose bị ghi đè thành `db`) |
 | `DB_USER` / `DB_PASSWORD` / `DB_NAME` | `flood` / `flood_secret` / `flood_warning` | Kết nối DB của API |
 | `DB_LOGGING` | `false` | Bật log câu lệnh SQL của TypeORM |
+| `DB_POOL_MAX` / `DB_POOL_ACQUIRE_TIMEOUT_MS` | `20` / `3000` | Kích thước pool node-postgres + timeout lấy connection (quá tải → fail nhanh thay vì treo) |
+| `MAP_CACHE_TTL_S` | `20` | TTL (giây) cache đọc `/map/*`; `0` để tắt |
 | `API_PORT` | `3000` | Cổng API |
 | `WEB_PORT` | `8080` | Cổng phục vụ SPA frontend (nginx) |
 | `CORS_ORIGINS` | `http://localhost:5173,http://localhost:8080` | Danh sách origin được phép gọi API |

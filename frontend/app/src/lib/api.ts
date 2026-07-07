@@ -550,6 +550,10 @@ export interface AssignImpactPayload {
 export const apiAssignImpact = (eventId: string, body: AssignImpactPayload) =>
   request<EventScope>(`/events/${eventId}/impact`, { method: 'POST', body });
 
+/** API 24 — POST /events/{id}/close. Closes an ONGOING event (Operator/Admin); 409 if already CLOSED. */
+export const apiCloseEvent = (eventId: string, body: { endTime?: string } = {}) =>
+  request<ApiEvent>(`/events/${eventId}/close`, { method: 'POST', body });
+
 // --- Group E — Map / GIS by viewport BBOX (APIs 27–30), read-only ---
 
 /** One grid-cell cluster (API 27, zoomed-out mode). */

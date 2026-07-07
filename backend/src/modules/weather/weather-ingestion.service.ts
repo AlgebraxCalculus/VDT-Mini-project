@@ -269,8 +269,8 @@ export class WeatherIngestionService {
     );
     if (!src[0]?.snapshot_id) return;
 
-    // Pass 1 — per (station, day) copy from the newest prior snapshot with river for
-    // that day. DISTINCT ON keeps the freshest value per day; 3-day lookback bounds the scan.
+    // Pass 1 — per (station, day) copy of the freshest prior river value (DISTINCT ON).
+    // 8-day window (forecast horizon + slack) survives a multi-day GloFAS outage.
     await manager.query(
       `UPDATE weather_forecasts cur
           SET river_water_level = src.level
@@ -284,7 +284,7 @@ export class WeatherIngestionService {
             WHERE prev.river_water_level IS NOT NULL
               AND prev.station_id IS NOT NULL
               AND ws.id < $1
-              AND ws.fetched_at >= now() - interval '3 days'
+              AND ws.fetched_at >= now() - interval '8 days'
               AND ws.source_code NOT IN ('GDACS','EONET','ReliefWeb','GloFAS')
               AND (prev.forecast_time)::date >= CURRENT_DATE
             ORDER BY prev.station_id, (prev.forecast_time)::date, ws.id DESC
@@ -309,7 +309,7 @@ export class WeatherIngestionService {
             WHERE prev.river_water_level IS NOT NULL
               AND prev.station_id IS NOT NULL
               AND ws.id < $1
-              AND ws.fetched_at >= now() - interval '3 days'
+              AND ws.fetched_at >= now() - interval '8 days'
               AND ws.source_code NOT IN ('GDACS','EONET','ReliefWeb','GloFAS')
             ORDER BY prev.station_id, ws.id DESC, prev.forecast_time DESC
          ) last

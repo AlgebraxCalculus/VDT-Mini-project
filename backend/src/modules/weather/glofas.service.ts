@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 import { DataSource } from 'typeorm';
 import { EventBusService } from '../../event-bus/event-bus.service';
@@ -15,7 +15,7 @@ import { GlofasProvider, RiverTarget } from './providers/glofas.provider';
  * {@link dischargeToLevels}) so it's comparable to flood_thresholds.
  */
 @Injectable()
-export class GlofasService {
+export class GlofasService implements OnModuleInit {
   private readonly logger = new Logger(GlofasService.name);
 
   /**
@@ -48,6 +48,21 @@ export class GlofasService {
     } catch (err) {
       this.logger.error(`GloFAS daily pull failed: ${(err as Error).message}`);
     }
+  }
+
+  /**
+   * Pull once ~1 min after boot: @nestjs/schedule never back-fills a cron missed while
+   * the container was down. Fire-and-forget; disable with GLOFAS_RUN_ON_STARTUP=false.
+   */
+  onModuleInit(): void {
+    if ((process.env.GLOFAS_RUN_ON_STARTUP ?? 'true') !== 'true') return;
+    const delayMs = Number(process.env.GLOFAS_STARTUP_DELAY_MS ?? '60000');
+    const timer = setTimeout(() => {
+      void this.run().catch((err) =>
+        this.logger.error(`GloFAS startup pull failed: ${(err as Error).message}`),
+      );
+    }, delayMs);
+    timer.unref(); // this timer must not hold the process open
   }
 
   /** One pull → DB enrichment → recompute trigger. Returns #stations enriched. */

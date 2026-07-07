@@ -36,7 +36,7 @@ Hệ thống giải quyết bài toán cốt lõi:
 - 📤 **Nhập liệu hàng loạt (CSV Import):** tải lên CSV, tiền kiểm định dạng phía client, xử lý bất đồng bộ theo lô 1.000 dòng qua hàng đợi, báo cáo tiến độ và dòng lỗi.
 - 🗺️ **Bản đồ GIS theo Viewport:** hiển thị trạm theo khung nhìn (bbox), **gộp marker khi zoom-out** (server-side clustering), tô màu theo mức rủi ro thực tế, vẽ vùng ảnh hưởng của sự kiện, lớp phủ thời tiết (mưa/gió/nhiệt) và tìm kiếm theo vùng.
 - 🌦️ **Tích hợp thời tiết đa nguồn:** chuỗi dự phòng dự báo **Open-Meteo → MET Norway → WeatherAPI** và chuỗi thiên tai **GDACS → EONET → ReliefWeb**, cùng tích hợp **GloFAS (Copernicus EWDS)** cho mực nước sông.
-- 🌀 **Tự động theo dõi sự kiện thiên tai:** cron kéo dữ liệu bão/lũ liên quan tới Việt Nam, tự động gán phạm vi ảnh hưởng (tỉnh + trạm), đóng sự kiện khi hết hiệu lực; hỗ trợ ghi đè thủ công.
+- 🌀 **Tự động theo dõi sự kiện thiên tai:** cron kéo dữ liệu bão/lũ liên quan tới Việt Nam, tự động gán phạm vi ảnh hưởng (tỉnh + trạm), tự đóng sự kiện khi hết hiệu lực; hỗ trợ đóng và ghi đè phạm vi thủ công.
 - 🧮 **Risk Engine (Bộ tính rủi ro):** công thức ngập lụt 4 lớp với **trọng số suy ra bằng AHP** (Analytic Hierarchy Process) theo nhóm trạm, tự động tính lại khi có dữ liệu mới.
 - 📡 **Real-time qua WebSocket:** Socket.IO xác thực qua JWT handshake, chia phòng theo ô bản đồ (tile rooms), phân phối cảnh báo **chính xác một lần** trên nhiều instance nhờ Redis adapter.
 - 📄 **Xuất báo cáo bất đồng bộ:** báo cáo tồn kho trạm & tổng hợp rủi ro, xuất **CSV / HTML in-được (PDF) / Word (.doc)**.

@@ -360,7 +360,6 @@ export default function MapView() {
       });
       return () => { alive = false; };
     }
-    // Feeds the panel's 5-day risk bars; the scrubber's day count comes from the province series.
     apiGetStationForecast(selectedId)
       .then((f) => { if (alive) setSelForecast(f.series.slice(0, FORECAST_DAYS)); })
       .catch(() => { if (alive) setSelForecast([]); });

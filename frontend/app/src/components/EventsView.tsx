@@ -5,6 +5,7 @@ import { riskMeta } from '../lib/display';
 import {
   ApiError,
   apiAssignImpact,
+  apiCloseEvent,
   apiGetEventStations,
   apiListEvents,
   apiListProvinces,
@@ -66,6 +67,7 @@ export default function EventsView() {
   const [scopeError, setScopeError] = useState<string | null>(null);
   const [selProvinceIds, setSelProvinceIds] = useState<number[]>([]);
   const [savingScope, setSavingScope] = useState(false);
+  const [closingEvent, setClosingEvent] = useState(false);
 
   // --- Loaders --------------------------------------------------------------
 
@@ -134,6 +136,8 @@ export default function EventsView() {
   const drawerEvent = events.find((e) => e.id === eventDrawerId) ?? null;
   const drawerStatus = drawerEvent?.status ?? null;
   const editableScope = canWrite && drawerStatus === 'ONGOING';
+  // Manual close (API 24) — hidden once CLOSED (incl. auto-close when the event drops the feed).
+  const canCloseEvent = canWrite && drawerStatus === 'ONGOING';
 
   // --- Actions --------------------------------------------------------------
 
@@ -178,6 +182,33 @@ export default function EventsView() {
       showToast(e instanceof ApiError ? e.message : 'Gán phạm vi ảnh hưởng thất bại.');
     } finally {
       setSavingScope(false);
+    }
+  };
+
+  const closeEvent = async () => {
+    if (!eventDrawerId || closingEvent) return;
+    if (!window.confirm('Đóng sự kiện này? Trạng thái chuyển sang "Đã đóng" và không thể mở lại.')) return;
+    setClosingEvent(true);
+    try {
+      const updated = await apiCloseEvent(eventDrawerId);
+      // Reflect the new CLOSED status in the card + drawer without a full reload.
+      setEvents((prev) =>
+        prev.map((e) =>
+          e.id === eventDrawerId ? { ...e, status: updated.status, endTime: updated.endTime } : e,
+        ),
+      );
+      showToast('Đã đóng sự kiện.');
+    } catch (e) {
+      // 409 = already CLOSED (e.g. the ingest cron auto-closed it first).
+      showToast(
+        e instanceof ApiError
+          ? e.status === 409
+            ? 'Sự kiện đã được đóng trước đó.'
+            : e.message
+          : 'Đóng sự kiện thất bại.',
+      );
+    } finally {
+      setClosingEvent(false);
     }
   };
 
@@ -359,18 +390,28 @@ export default function EventsView() {
               )}
             </div>
 
-            <div style={{ padding: '16px 20px', borderTop: '1px solid #EEF0F3', display: 'flex', gap: 10 }}>
-              <button onClick={closeDrawer} style={{ flex: 1, height: 44, border: '1.5px solid #E2E5EA', background: '#fff', borderRadius: 10, fontSize: 14, fontWeight: 600, color: '#3A3F47', cursor: 'pointer' }}>Đóng</button>
-              {editableScope && (
-                <button
-                  onClick={saveScope}
-                  disabled={savingScope}
-                  style={{ flex: 1.4, height: 44, border: 'none', background: '#EE0033', borderRadius: 10, fontSize: 14, fontWeight: 700, color: '#fff', cursor: savingScope ? 'default' : 'pointer', opacity: savingScope ? 0.6 : 1 }}
-                >
-                  {savingScope ? 'Đang lưu…' : 'Lưu phạm vi ảnh hưởng'}
-                </button>
-              )}
-            </div>
+            {(canCloseEvent || editableScope) && (
+              <div style={{ padding: '16px 20px', borderTop: '1px solid #EEF0F3', display: 'flex', gap: 10 }}>
+                {canCloseEvent && (
+                  <button
+                    onClick={closeEvent}
+                    disabled={closingEvent}
+                    style={{ flex: 1, height: 44, border: '1.5px solid #EE0033', background: '#fff', borderRadius: 10, fontSize: 14, fontWeight: 700, color: '#EE0033', cursor: closingEvent ? 'default' : 'pointer', opacity: closingEvent ? 0.6 : 1 }}
+                  >
+                    {closingEvent ? 'Đang đóng…' : 'Đóng sự kiện'}
+                  </button>
+                )}
+                {editableScope && (
+                  <button
+                    onClick={saveScope}
+                    disabled={savingScope}
+                    style={{ flex: 1.4, height: 44, border: 'none', background: '#EE0033', borderRadius: 10, fontSize: 14, fontWeight: 700, color: '#fff', cursor: savingScope ? 'default' : 'pointer', opacity: savingScope ? 0.6 : 1 }}
+                  >
+                    {savingScope ? 'Đang lưu…' : 'Lưu phạm vi ảnh hưởng'}
+                  </button>
+                )}
+              </div>
+            )}
           </div>
         </>
       )}

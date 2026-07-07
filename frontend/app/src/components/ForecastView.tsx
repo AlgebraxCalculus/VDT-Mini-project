@@ -5,12 +5,11 @@ import { ApiError, apiGetStationForecast, apiListEvents, apiListRiskStations, ap
 import { exportReport } from '../lib/report';
 import type { ClassifiedForecastPoint, RiskAssessment } from '../types';
 
-// Top at-risk stations shown; each gets a full day-series fetched for its sparkline.
+// Each shown station needs its own day-series fetch (API 38), so bound the list size.
 const TOP_N = 24;
-// Forecast horizon rendered in the trend sparkline.
 const FORECAST_DAYS = 5;
 
-/** A station row with its full-window risk sparkline + peak. */
+/** A station row: risk sparkline + peak day. */
 interface FcRow {
   id: number;
   stationCode: string;
@@ -34,8 +33,8 @@ function weekday(dateStr: string): string {
   return Number.isNaN(d.getTime()) ? dateStr.slice(5) : VN_WEEKDAYS[d.getDay()];
 }
 
-// API 36 pages per station×day (partial days per station); API 38 supplies the full
-// series the sparkline needs. Ranking record carries the meta, series carries the bars.
+// API 36 pages per station×day, so its per-station days are partial; the sparkline needs
+// the full series from API 38.
 function buildRow(a: RiskAssessment, series: ClassifiedForecastPoint[]): FcRow {
   const station = a.station;
   const scores = series.length ? series.map((p) => p.riskScore ?? 0) : [Math.round(a.riskScore ?? 0)];
@@ -74,8 +73,7 @@ export default function ForecastView() {
   const [activeEvents, setActiveEvents] = useState<number>(0);
   const [exporting, setExporting] = useState(false);
 
-  // Load the at-risk list (API 36), total station count (Group C), and ongoing-event
-  // count (API 20). All stay empty/zero on failure (the Risk Engine may not have run).
+  // Loads stay empty/zero on failure — the Risk Engine may not have run yet.
   useEffect(() => {
     let cancelled = false;
     apiListRiskStations({ size: 100, sort: 'severity', includeLow: true })
